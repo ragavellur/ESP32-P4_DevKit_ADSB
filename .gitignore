@@ -1,0 +1,8 @@
+# ESP32-P4 ADS-B Radar
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+.directory
+*.log
+.DS_Store

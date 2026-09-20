@@ -1,0 +1,12 @@
+menu "ADS-B Radar"
+
+    config ADSB_RADAR_ETH
+        bool "Bring up Ethernet + web server after boot"
+        default y
+        help
+            Starts the onboard 100M Ethernet (P4 internal EMAC + IP101GRI RMII
+            PHY) with a DHCP client and serves the radar web UI over the wired
+            network. Requires the Ethernet cable to be connected and a DHCP
+            server on the LAN.
+
+endmenu

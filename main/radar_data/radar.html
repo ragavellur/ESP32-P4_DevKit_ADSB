@@ -1,0 +1,518 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Raga Radar - ADS-B</title>
+    <style>
+        body { background: #010a01; color: #00ff41; font-family: 'Courier New', monospace; margin: 0; overflow: hidden; touch-action: none; }
+        
+        /* Main UI Panel */
+        #ui { 
+            position: absolute; top: 15px; left: 15px; background: rgba(0, 20, 0, 0.9); 
+            border: 1px solid #00ff41; padding: 10px; font-size: 13px; z-index: 100; line-height: 1.5;
+            min-width: 270px; transition: all 0.2s;
+        }
+        
+        #ui-header {
+            font-weight: bold; border-bottom: 1px solid #00ff41; padding-bottom: 5px; margin-bottom: 10px;
+            display: flex; justify-content: space-between; align-items: center; cursor: pointer;
+        }
+
+        .control-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+        
+        input[type="number"], select { 
+            background: #000; border: 1px solid #00ff41; color: #00ff41; 
+            font-family: 'Courier New', monospace; font-size: 12px; padding: 2px 5px; box-sizing: border-box;
+        }
+        input[type="number"] { width: 65px; }
+        
+        #status { font-size: 11px; color: #00aa33; margin-top: 5px; }
+        #user-location { font-size: 11px; color: #008822; border-top: 1px dashed #004400; padding-top: 5px; margin-top: 5px; }
+        
+        canvas { display: block; filter: brightness(1.2); }
+        
+        /* Tooltip Styling */
+        #tooltip {
+            position: absolute; background: rgba(0, 20, 0, 0.95); border: 1px solid #00ff41;
+            color: #00ff41; padding: 10px; font-size: 12px; font-family: 'Courier New', monospace;
+            pointer-events: none; display: none; z-index: 200;
+            box-shadow: 0 0 10px rgba(0, 255, 65, 0.3); text-shadow: 0 0 3px #00ff41; white-space: nowrap;
+        }
+
+        .close-btn {
+            position: absolute; top: 5px; right: 10px; font-size: 16px; font-weight: bold;
+            color: #00ff41; cursor: pointer; pointer-events: auto; padding: 5px;
+        }
+
+        /* Toggle Switch Styling */
+        .switch { position: relative; display: inline-block; width: 34px; height: 18px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { 
+            position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; 
+            background-color: #003300; border: 1px solid #00ff41; transition: .2s; 
+        }
+        .slider:before { 
+            position: absolute; content: ""; height: 12px; width: 12px; left: 2px; bottom: 2px; 
+            background-color: #00aa33; transition: .2s; 
+        }
+        input:checked + .slider { background-color: #005511; }
+        input:checked + .slider:before { transform: translateX(16px); background-color: #00ff41; }
+
+        @media (max-width: 768px) {
+            #ui { width: 85vw; min-width: auto; max-width: 350px; }
+            input[type="number"], select { height: 28px; font-size: 14px; } 
+            #tooltip.mobile-active {
+                top: auto !important; bottom: 20px !important; left: 50% !important;
+                transform: translateX(-50%) !important; width: 85% !important; white-space: normal;
+                padding-right: 30px; 
+            }
+        }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <div id="ui-header" onclick="toggleMenu()">
+        <span>Raga Radar - Pune</span>
+        <span id="toggleBtn">[-]</span>
+    </div>
+    <div id="ui-content">
+        <div class="control-row"><span>Range (NM):</span> <input type="number" id="range" value="100"></div>
+        <div class="control-row"><span>Sweep (Sec):</span> <input type="number" id="sweep" value="30"></div>
+        <div class="control-row">
+            <span>Alt Filter (FT):</span> 
+            <div style="display:flex; gap:5px;">
+                <input type="number" id="minAlt" value="0" title="Min Altitude">
+                <input type="number" id="maxAlt" value="60000" title="Max Altitude">
+            </div>
+        </div>
+        <div class="control-row"><span>Route Format:</span> 
+            <select id="routeFormat">
+                <option value="short">Short</option>
+                <option value="detailed">Detailed</option>
+            </select>
+        </div>
+        <div class="control-row"><span>Route Code:</span> 
+            <select id="codeType">
+                <option value="icao">ICAO</option>
+                <option value="iata">IATA</option>
+            </select>
+        </div>
+        <div class="control-row">
+            <span>Show Trails:</span>
+            <label class="switch">
+                <input type="checkbox" id="showTrails" checked>
+                <span class="slider"></span>
+            </label>
+        </div>
+    </div>
+    <div id="status">Waiting for sweep...</div>
+    <div id="user-location">User GPS: Fetching...</div>
+</div>
+
+<div id="tooltip"></div>
+<canvas id="radarCanvas"></canvas>
+
+<script>
+    const canvas = document.getElementById('radarCanvas');
+    const ctx = canvas.getContext('2d');
+    const statusDiv = document.getElementById('status');
+    const userLocDiv = document.getElementById('user-location');
+    const JSON_URL = '/data/aircraft.json'; 
+    const tooltip = document.getElementById('tooltip');
+    const trailsToggle = document.getElementById('showTrails');
+    
+    let menuOpen = window.innerWidth > 768; 
+    const uiContent = document.getElementById('ui-content');
+    const toggleBtn = document.getElementById('toggleBtn');
+    
+    uiContent.style.display = menuOpen ? 'block' : 'none';
+    toggleBtn.innerText = menuOpen ? '[-]' : '[+]';
+
+    function toggleMenu() {
+        menuOpen = !menuOpen;
+        uiContent.style.display = menuOpen ? 'block' : 'none';
+        toggleBtn.innerText = menuOpen ? '[-]' : '[+]';
+    }
+
+    window.closeTarget = function() {
+        lockedTargetHex = null;
+        tooltip.style.display = 'none';
+    };
+
+    let cursorX = -100, cursorY = -100;
+    let lockedTargetHex = null; 
+    
+    let latestApiData = [];      
+    let radarTargets = new Map(); 
+    let routeMemory = {}; 
+    let trailsMemory = new Map(); 
+
+    // --- RADAR CENTER (from firmware /api/status) ---
+    let receiverLat = 18.480718;   // fallback: Pune
+    let receiverLon = 73.898235;
+
+    async function loadReceiver() {
+        try {
+            const r = await fetch('/api/status');
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const s = await r.json();
+            if (s && s.receiver && typeof s.receiver.lat === 'number') {
+                receiverLat = s.receiver.lat;
+                receiverLon = s.receiver.lon;
+            }
+            if (s && s.phase) {
+                const phase = document.getElementById('recvPhase');
+                if (phase) phase.innerText = `RX: ${s.phase}`;
+            }
+        } catch (err) {
+            // keep fallback center; the page still works offline
+        }
+    }
+
+    let userLat = null, userLon = null;
+    let scanAngle = -Math.PI / 2; 
+    let lastAngle = scanAngle;
+
+    canvas.addEventListener('pointermove', (e) => {
+        if (e.pointerType === 'mouse') {
+            const rect = canvas.getBoundingClientRect();
+            cursorX = e.clientX - rect.left;
+            cursorY = e.clientY - rect.top;
+        }
+    });
+
+    canvas.addEventListener('pointerdown', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const tapX = e.clientX - rect.left;
+        const tapY = e.clientY - rect.top;
+        
+        let hitFound = false;
+        radarTargets.forEach((target, hex) => {
+            const dx = tapX - target.displayX;
+            const dy = tapY - target.displayY;
+            if (dx * dx + dy * dy < 400) { 
+                lockedTargetHex = hex;
+                hitFound = true;
+            }
+        });
+        if (!hitFound) lockedTargetHex = null; 
+    });
+
+    canvas.addEventListener('pointerout', (e) => {
+        if (e.pointerType === 'mouse') { cursorX = -100; cursorY = -100; }
+    });
+
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    navigator.geolocation.getCurrentPosition((pos) => {
+        userLat = pos.coords.latitude;
+        userLon = pos.coords.longitude;
+        userLocDiv.innerText = `User GPS: ${userLat.toFixed(4)}, ${userLon.toFixed(4)}`;
+    }, (err) => {
+        userLocDiv.innerText = `User GPS: Unavailable`;
+    });
+
+    async function syncRoutesToMemory(currentAircraft) {
+        const activeCallsigns = new Set();
+        const planesToFetch = [];
+
+        currentAircraft.forEach(ac => {
+            if (ac.flight) {
+                const callsign = ac.flight.trim();
+                if (callsign) {
+                    activeCallsigns.add(callsign);
+                    if (!routeMemory[callsign]) {
+                        planesToFetch.push({ callsign: callsign, lat: ac.lat || 0, lng: ac.lon || 0 });
+                        routeMemory[callsign] = { pending: true }; 
+                    }
+                }
+            }
+        });
+
+        Object.keys(routeMemory).forEach(callsign => {
+            if (!activeCallsigns.has(callsign)) delete routeMemory[callsign];
+        });
+
+        if (planesToFetch.length > 0) {
+            try {
+                const response = await fetch('https://api.adsb.lol/api/0/routeset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ planes: planesToFetch })
+                });
+                if (response.ok) {
+                    const data = await response.json(); 
+                    const responseMap = {};
+                    data.forEach(route => { if (route.callsign) responseMap[route.callsign] = route; });
+                    
+                    planesToFetch.forEach(plane => {
+                        const cs = plane.callsign;
+                        if (responseMap[cs]) routeMemory[cs] = responseMap[cs]; 
+                        else routeMemory[cs] = { not_found: true }; 
+                    });
+                }
+            } catch (error) {
+                planesToFetch.forEach(plane => {
+                    if (routeMemory[plane.callsign] && routeMemory[plane.callsign].pending) delete routeMemory[plane.callsign];
+                });
+            }
+        }
+    }
+
+    async function fetchAircraftData() {
+        try {
+            const response = await fetch(`${JSON_URL}?t=${Date.now()}`);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            
+            const data = await response.json();
+            latestApiData = data.aircraft || []; 
+            
+            syncRoutesToMemory(latestApiData);
+            const activeCacheCount = Object.keys(routeMemory).length;
+            statusDiv.innerHTML = `SYNCED | ACFT: ${latestApiData.length} | CACHED RTE: ${activeCacheCount}<br>RADAR REF: ${receiverLat.toFixed(4)}, ${receiverLon.toFixed(4)}`;
+        } catch (err) {
+            statusDiv.innerHTML = `<span style="color:red">SYNC ERR: ${err.message}</span>`;
+        }
+    }
+
+    function gpsToXY(lat, lon, rangeNM, screenRadius) {
+        const dy = (lat - receiverLat) * 60;
+        const dx = (lon - receiverLon) * 60 * Math.cos(receiverLat * Math.PI / 180);
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+        return { 
+            x: centerX + (dx / rangeNM) * screenRadius, 
+            y: centerY - (dy / rangeNM) * screenRadius, 
+            dist: Math.sqrt(dx*dx + dy*dy) 
+        };
+    }
+
+    function render() {
+        ctx.fillStyle = "rgba(0, 12, 0, 0.15)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+        const screenRadius = Math.min(centerX, centerY) * 0.85;
+        const cfgRange = parseFloat(document.getElementById('range').value) || 100;
+        const cfgSweep = parseFloat(document.getElementById('sweep').value) || 30;
+        const routeFormat = document.getElementById('routeFormat').value;
+        const codeType = document.getElementById('codeType').value;
+        const showTrails = trailsToggle.checked;
+        
+        const minAlt = parseFloat(document.getElementById('minAlt').value) || 0;
+        const maxAlt = parseFloat(document.getElementById('maxAlt').value) || 60000;
+
+        lastAngle = scanAngle;
+        scanAngle += (Math.PI * 2) / (60 * cfgSweep);
+
+        if (Math.floor((lastAngle + Math.PI/2) / (Math.PI*2)) < Math.floor((scanAngle + Math.PI/2) / (Math.PI*2))) {
+            fetchAircraftData();
+        }
+
+        ctx.strokeStyle = "#002200";
+        ctx.fillStyle = "#004400"; 
+        ctx.font = "10px Courier New";
+        ctx.textAlign = "center"; 
+        for (let i = 1; i <= 4; i++) {
+            const r = (screenRadius / 4) * i;
+            const dist = (cfgRange / 4) * i;
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, r, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.fillText(`${dist} NM`, centerX, centerY - r + 10);
+        }
+        ctx.textAlign = "left";
+
+        ctx.strokeStyle = "#00ff41";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(centerX, centerY);
+        ctx.lineTo(centerX + Math.cos(scanAngle) * screenRadius, centerY + Math.sin(scanAngle) * screenRadius);
+        ctx.stroke();
+
+        let displayAircraft = null;
+
+        const currentScan = (scanAngle % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+        const prevScan = (lastAngle % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2);
+
+        const filteredApiData = latestApiData.filter(ac => {
+            const alt = ac.alt_baro || 0;
+            return alt >= minAlt && alt <= maxAlt;
+        });
+
+        filteredApiData.forEach(ac => {
+            if (!ac.lat || !ac.lon) return;
+            const pos = gpsToXY(ac.lat, ac.lon, cfgRange, screenRadius);
+            if (pos.dist > cfgRange) return;
+
+            let targetAngle = Math.atan2(pos.y - centerY, pos.x - centerX);
+            targetAngle = (targetAngle + Math.PI * 2) % (Math.PI * 2);
+
+            let crossed = false;
+            if (prevScan < currentScan) {
+                if (targetAngle >= prevScan && targetAngle <= currentScan) crossed = true;
+            } else {
+                if (targetAngle >= prevScan || targetAngle <= currentScan) crossed = true;
+            }
+
+            if (crossed) {
+                let trend = "=";
+                if (ac.baro_rate !== undefined) {
+                    if (ac.baro_rate > 64) trend = "↑";
+                    else if (ac.baro_rate < -64) trend = "↓";
+                } else if (radarTargets.has(ac.hex)) {
+                    const oldTarget = radarTargets.get(ac.hex);
+                    if (ac.alt_baro > oldTarget.alt_baro + 50) trend = "↑";
+                    else if (ac.alt_baro < oldTarget.alt_baro - 50) trend = "↓";
+                    else trend = oldTarget.trend || "=";
+                }
+
+                if (radarTargets.has(ac.hex)) {
+                    const oldTarget = radarTargets.get(ac.hex);
+                    if (oldTarget.lat !== ac.lat || oldTarget.lon !== ac.lon) {
+                        let trail = trailsMemory.get(ac.hex) || [];
+                        trail.push({ lat: oldTarget.lat, lon: oldTarget.lon });
+                        if (trail.length > 7) trail.shift();
+                        trailsMemory.set(ac.hex, trail);
+                    }
+                }
+                radarTargets.set(ac.hex, { ...ac, displayX: pos.x, displayY: pos.y, alpha: 1.0, trend: trend });
+            }
+        });
+
+        radarTargets.forEach((target, hex) => {
+            const isEmergency = ['7700', '7600', '7500'].includes(target.squawk);
+            
+            if (showTrails && trailsMemory.has(hex)) {
+                const trail = trailsMemory.get(hex);
+                trail.forEach((point, index) => {
+                    const trailPos = gpsToXY(point.lat, point.lon, cfgRange, screenRadius);
+                    if (trailPos.dist <= cfgRange) {
+                        const dotAlpha = 0.2 + (index / trail.length) * 0.5;
+                        ctx.fillStyle = isEmergency ? `rgba(255, 0, 0, ${dotAlpha})` : `rgba(0, 255, 65, ${dotAlpha})`;
+                        ctx.beginPath();
+                        ctx.arc(trailPos.x, trailPos.y, 1.5, 0, Math.PI * 2);
+                        ctx.fill();
+                    }
+                });
+            }
+
+            target.alpha = Math.max(0.35, target.alpha - (1 / (60 * cfgSweep)));
+            
+            ctx.globalAlpha = target.alpha;
+            ctx.fillStyle = isEmergency ? "#ff0000" : "#00ff41";
+            ctx.strokeStyle = ctx.fillStyle;
+            
+            if (lockedTargetHex === hex) {
+                ctx.beginPath();
+                ctx.arc(target.displayX, target.displayY, 8, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+
+            ctx.beginPath();
+            ctx.arc(target.displayX, target.displayY, 3, 0, Math.PI * 2);
+            ctx.fill();
+
+            const callsign = target.flight ? target.flight.trim() : target.hex.toUpperCase();
+            const altRaw = target.alt_baro !== undefined ? target.alt_baro : 0;
+            let altFL = altRaw <= 0 ? "GND" : Math.floor(altRaw / 100).toString().padStart(3, '0');
+            const speed = target.gs ? Math.round(target.gs).toString() : "---";
+            const trend = target.trend || "=";
+
+            ctx.beginPath();
+            ctx.moveTo(target.displayX + 3, target.displayY - 3);
+            ctx.lineTo(target.displayX + 7, target.displayY - 7);
+            ctx.stroke();
+
+            ctx.font = "10px Courier New";
+            ctx.fillText(callsign, target.displayX + 8, target.displayY - 6);
+            ctx.fillText(`${altFL}${trend} ${speed}`, target.displayX + 8, target.displayY + 6);
+            
+            ctx.globalAlpha = 1.0; 
+
+            const dx = cursorX - target.displayX;
+            const dy = cursorY - target.displayY;
+            if (dx * dx + dy * dy < 150) displayAircraft = target;
+            if (lockedTargetHex === hex) displayAircraft = target;
+        });
+
+        const currentHexes = new Set(filteredApiData.map(a => a.hex));
+        radarTargets.forEach((_, hex) => {
+            if (!currentHexes.has(hex)) {
+                radarTargets.delete(hex);
+                trailsMemory.delete(hex);
+            }
+        });
+
+        // --- TOOLTIP UI UPDATES ---
+        if (displayAircraft) {
+            const isMobile = window.innerWidth <= 768;
+            tooltip.style.display = 'block';
+            
+            let closeButtonHTML = '';
+
+            if (isMobile && lockedTargetHex) {
+                tooltip.classList.add('mobile-active');
+                closeButtonHTML = `<div class="close-btn" onclick="closeTarget()">✖</div>`;
+            } else {
+                tooltip.classList.remove('mobile-active');
+                tooltip.style.left = (displayAircraft.displayX + 15) + 'px'; 
+                tooltip.style.top = (displayAircraft.displayY + 15) + 'px';
+            }
+            
+            const callsign = displayAircraft.flight ? displayAircraft.flight.trim() : 'UNKNOWN';
+            let routeDisplay = "NO ROUTE DATA";
+            
+            if (callsign !== 'UNKNOWN' && routeMemory[callsign]) {
+                const memInfo = routeMemory[callsign];
+                if (memInfo.pending) routeDisplay = "FETCHING...";
+                else if (memInfo.not_found) routeDisplay = "NOT IN DB";
+                else {
+                    let shortCode = codeType === 'icao' ? (memInfo.airport_codes || 'N/A') : (memInfo._airport_codes_iata || 'N/A');
+                    if (routeFormat === 'short') {
+                        routeDisplay = shortCode;
+                    } else {
+                        if (memInfo._airports && memInfo._airports.length >= 2) {
+                            const src = memInfo._airports[0];
+                            const dst = memInfo._airports[memInfo._airports.length - 1];
+                            routeDisplay = `${shortCode}<br>
+                                FROM: ${src.name || 'Unknown'} (${src.location || 'Unknown'})<br>
+                                TO&nbsp;&nbsp;: ${dst.name || 'Unknown'} (${dst.location || 'Unknown'})`;
+                        } else {
+                            routeDisplay = `${shortCode} (PARTIAL DATA)`;
+                        }
+                    }
+                }
+            }
+
+            tooltip.innerHTML = `
+                ${closeButtonHTML}
+                <strong style="border-bottom: 1px solid #00ff41; display:block; margin-bottom:4px; padding-right: 20px;">TARGET ACQUIRED ${lockedTargetHex === displayAircraft.hex ? '[LOCKED]' : ''}</strong>
+                FLT: ${callsign}<br>
+                RTE: ${routeDisplay}<br>
+                HEX: ${displayAircraft.hex ? displayAircraft.hex.toUpperCase() : '---'}<br>
+                ALT: ${displayAircraft.alt_baro ? displayAircraft.alt_baro + ' FT' : '---'}<br>
+                SPD: ${displayAircraft.gs ? displayAircraft.gs + ' KTS' : '---'}<br>
+                SQK: ${displayAircraft.squawk || '----'}
+            `;
+        } else {
+            tooltip.style.display = 'none';
+        }
+
+        requestAnimationFrame(render);
+    }
+
+    loadReceiver();
+    fetchAircraftData();
+    render();
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+## IDF Component Registry dependencies (managed components)
+dependencies:
+  idf: '>=5.5'
+  espressif/usb: '1.5.0'

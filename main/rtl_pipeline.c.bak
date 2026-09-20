@@ -1,0 +1,390 @@
+#include "rtl_pipeline.h"
+
+#include <string.h>
+
+#include "esp_heap_caps.h"
+#include "esp_rtl_sdr.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "adsb_decoder_bridge.h"
+#include "esp_log.h"
+
+#define PIPELINE_TAG "rtl_pipe"
+#define DSP_TAG "adsb_dsp"
+#define STATUS_TAG "rtl_stat"
+
+/* IQ ring geometry (CU8). 8 * 32 KiB = 256 KiB in PSRAM. */
+#define IQ_BLOCK_BYTES (32 * 1024)
+#define IQ_RING_SLOTS 8
+
+#define ADSB_FREQ_HZ 1090000000u
+#define ADSB_RATE_SPS 2048000u
+
+/* Waiting for a device/state change. */
+#define DEVICE_WAIT_TICK pdMS_TO_TICKS(500)
+#define ENUM_TIMEOUT_TICK pdMS_TO_TICKS(20000)
+
+typedef struct {
+    uint8_t *data;
+    size_t bytes;
+    uint32_t sequence;
+} iq_slot_t;
+
+typedef struct {
+    esp_rtl_sdr_handle_t handle;
+    iq_slot_t slots[IQ_RING_SLOTS];
+    QueueHandle_t free_q;
+    QueueHandle_t filled_q;
+    SemaphoreHandle_t fsm_sem; /* posted by event callback for pipeline task */
+    bool installed;
+    bool started_req;
+    bool device_present;
+    bool decode_ok;
+    esp_rtl_sdr_metrics_t metrics;
+    /* consumer-side counters (written by DSP task, read by status task) */
+    uint32_t frame_cnt;
+    uint32_t crc_ok;
+} rtl_ctx_t;
+
+static rtl_ctx_t s_ctx;
+
+/* ------------------------------------------------------------------ */
+/* Ring                                                                 */
+/* ------------------------------------------------------------------ */
+
+static bool ring_init(void)
+{
+    for (int i = 0; i < IQ_RING_SLOTS; i++) {
+        s_ctx.slots[i].data = heap_caps_malloc(IQ_BLOCK_BYTES, MALLOC_CAP_SPIRAM);
+        if (!s_ctx.slots[i].data) {
+            ESP_LOGE(PIPELINE_TAG, "PSRAM slot %d alloc failed", i);
+            return false;
+        }
+        s_ctx.slots[i].bytes = 0;
+    }
+    s_ctx.free_q = xQueueCreate(IQ_RING_SLOTS, sizeof(uint32_t));
+    s_ctx.filled_q = xQueueCreate(IQ_RING_SLOTS, sizeof(uint32_t));
+    if (!s_ctx.free_q || !s_ctx.filled_q) {
+        ESP_LOGE(PIPELINE_TAG, "ring queues alloc failed");
+        return false;
+    }
+    for (uint32_t i = 0; i < IQ_RING_SLOTS; i++) {
+        xQueueSend(s_ctx.free_q, &i, 0);
+    }
+    return true;
+}
+
+/* Returns an owned slot index, or UINT32_MAX if none free. */
+static uint32_t ring_take_free(void)
+{
+    uint32_t idx;
+    if (xQueueReceive(s_ctx.free_q, &idx, 0) != pdTRUE) {
+        return UINT32_MAX;
+    }
+    return idx;
+}
+
+static void ring_give_filled(uint32_t idx)
+{
+    if (xQueueSend(s_ctx.filled_q, &idx, 0) != pdTRUE) {
+        xQueueSend(s_ctx.free_q, &idx, 0); /* drop: put back */
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Driver events (runs on driver delivery task, core 0)                */
+/* ------------------------------------------------------------------ */
+
+static void on_event(esp_rtl_sdr_event_t event, const void *payload, void *ctx)
+{
+    (void)ctx;
+
+    switch (event) {
+    case ESP_RTL_SDR_EVT_ENUMERATED: {
+        const esp_rtl_sdr_device_info_t *d =
+            (const esp_rtl_sdr_device_info_t *)payload;
+        if (d) {
+            ESP_LOGI(PIPELINE_TAG, "RTL-SDR found: %s (vid=%04x pid=%04x hs=%d)",
+                     d->product, d->vid, d->pid, d->high_speed);
+        }
+        break;
+    }
+    case ESP_RTL_SDR_EVT_READY:
+        ESP_LOGI(PIPELINE_TAG, "RTL-SDR ready (accepted, idle)");
+        s_ctx.device_present = true;
+        break;
+    case ESP_RTL_SDR_EVT_STREAM_STARTED:
+        ESP_LOGI(PIPELINE_TAG, "stream started");
+        s_ctx.started_req = true;
+        break;
+    case ESP_RTL_SDR_EVT_STOPPED:
+        ESP_LOGI(PIPELINE_TAG, "stream stopped");
+        s_ctx.started_req = false;
+        break;
+    case ESP_RTL_SDR_EVT_IQ_BLOCK: {
+        const esp_rtl_sdr_iq_block_t *blk =
+            (const esp_rtl_sdr_iq_block_t *)payload;
+        if (!blk || blk->bytes == 0 || (blk->bytes & 1)) {
+            break;
+        }
+        /* Cheap guard: reject absurd block sizes */
+        if (blk->bytes > IQ_BLOCK_BYTES) {
+            break;
+        }
+        uint32_t idx = ring_take_free();
+        if (idx == UINT32_MAX) {
+            break; /* consumer overload; driver counts its own overruns */
+        }
+        memcpy(s_ctx.slots[idx].data, blk->data, blk->bytes);
+        s_ctx.slots[idx].bytes = blk->bytes;
+        s_ctx.slots[idx].sequence = blk->sequence;
+        ring_give_filled(idx);
+        break;
+    }
+    case ESP_RTL_SDR_EVT_ERROR: {
+        const esp_rtl_sdr_error_info_t *e =
+            (const esp_rtl_sdr_error_info_t *)payload;
+        if (e) {
+            ESP_LOGE(PIPELINE_TAG, "driver error: %s", e->message);
+        }
+        if (s_ctx.fsm_sem) {
+            BaseType_t woken = pdFALSE;
+            xSemaphoreGiveFromISR(s_ctx.fsm_sem, &woken);
+            /* This callback runs in a task context, not ISR, but consistent. */
+        }
+        break;
+    }
+    case ESP_RTL_SDR_EVT_DISCONNECTED:
+        ESP_LOGW(PIPELINE_TAG, "device disconnected");
+        s_ctx.device_present = false;
+        if (s_ctx.fsm_sem) {
+            xSemaphoreGive(s_ctx.fsm_sem);
+        }
+        break;
+    case ESP_RTL_SDR_EVT_HEALTH: {
+        const esp_rtl_sdr_health_info_t *h =
+            (const esp_rtl_sdr_health_info_t *)payload;
+        if (h && h->overall != ESP_RTL_SDR_HEALTH_OK
+            && h->overall != ESP_RTL_SDR_HEALTH_UNKNOWN) {
+            ESP_LOGW(PIPELINE_TAG, "health: usb=%d rf=%d eff=%.0f%% %s",
+                     h->usb, h->rf, 100.0 * h->efficiency, h->advice);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Decoder task (core 1)                                               */
+/* ------------------------------------------------------------------ */
+
+static void adsb_decoder_task(void *arg)
+{
+    (void)arg;
+
+    /* Decoder self-check at boot; log settle. */
+    s_ctx.decode_ok = adsb_decoder_init();
+    ESP_LOGI(DSP_TAG, "decoder self_check=%d", s_ctx.decode_ok);
+    if (!s_ctx.decode_ok) {
+        ESP_LOGE(DSP_TAG, "decoder self-check FAILED - frames will be ignored");
+    }
+    adsb_decoder_reset();
+
+    for (;;) {
+        uint32_t idx;
+        if (xQueueReceive(s_ctx.filled_q, &idx, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+        iq_slot_t *slot = &s_ctx.slots[idx];
+        if (s_ctx.decode_ok) {
+            adsb_decoder_process(slot->data, slot->bytes);
+        }
+        xQueueSend(s_ctx.free_q, &idx, 0);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Status task (core 1)                                                */
+/* ------------------------------------------------------------------ */
+
+static void status_task(void *arg)
+{
+    (void)arg;
+    uint32_t last_frames = 0;
+    uint32_t last_crc = 0;
+
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        esp_rtl_sdr_metrics_t m;
+        memset(&m, 0, sizeof(m));
+        if (s_ctx.handle &&
+            esp_rtl_sdr_get_metrics(s_ctx.handle, &m) == ESP_OK) {
+            s_ctx.metrics = m;
+        }
+
+        adsb_decoder_stats_t ds;
+        memset(&ds, 0, sizeof(ds));
+        adsb_decoder_get_stats(&ds);
+
+        const uint32_t frames_now = s_ctx.decode_ok ? ds.frames : 0;
+        const uint32_t crc_now = s_ctx.decode_ok ? ds.crc_ok : 0;
+        s_ctx.frame_cnt = frames_now;
+        s_ctx.crc_ok = crc_now;
+
+        ESP_LOGI(STATUS_TAG, "sps=%u eff=%u over=%u drops=%u | decoder: pre=%u "
+                 "frm=%u(+%u/s) df17=%u crc=%u(+%u/s) mag=[%u,%u]",
+                 m.sample_rate_sps, m.effective_sps, m.overruns,
+                 m.consumer_drops,
+                 ds.preambles, frames_now, frames_now - last_frames,
+                 ds.df17, crc_now, crc_now - last_crc,
+                 ds.magnitude_min, ds.magnitude_max);
+
+        /* Refresh linux-style "frame rate" field for status queries */
+        last_frames = frames_now;
+        last_crc = crc_now;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Pipeline bring-up task (core 1)                                     */
+/* ------------------------------------------------------------------ */
+
+static void rtl_driver_task(void *arg)
+{
+    (void)arg;
+
+    s_ctx.fsm_sem = xSemaphoreCreateBinary();
+    if (!s_ctx.fsm_sem) {
+        ESP_LOGE(PIPELINE_TAG, "fsm sem alloc failed");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    esp_rtl_sdr_config_t cfg;
+    esp_rtl_sdr_config_default(&cfg);
+    cfg.host_library_already_installed = false;
+    cfg.transfer_bytes = IQ_BLOCK_BYTES;
+    cfg.transfer_count = 3;
+    cfg.event_cb = on_event;
+    cfg.event_ctx = NULL;
+    cfg.usb_task_priority = 20;
+    cfg.usb_task_core_id = 0;
+    cfg.delivery_mode = ESP_RTL_SDR_DELIVERY_CALLBACK;
+
+    esp_err_t ret = esp_rtl_sdr_install(&cfg, &s_ctx.handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(PIPELINE_TAG, "install failed: %s", esp_err_to_name(ret));
+        vTaskDelete(NULL);
+        return;
+    }
+    s_ctx.installed = true;
+    ESP_LOGI(PIPELINE_TAG, "driver installed");
+
+    /* Wait for device accept / ready (either event or state poll). */
+    TickType_t deadline = xTaskGetTickCount() + ENUM_TIMEOUT_TICK;
+    while (esp_rtl_sdr_get_state(s_ctx.handle) != ESP_RTL_SDR_STATE_READY
+           && xTaskGetTickCount() < deadline) {
+        /* EVT_READY may have raced before this loop and already set a flag */
+        if (s_ctx.device_present) {
+            break;
+        }
+        vTaskDelay(DEVICE_WAIT_TICK);
+    }
+
+    esp_rtl_sdr_state_t st = esp_rtl_sdr_get_state(s_ctx.handle);
+    if (st != ESP_RTL_SDR_STATE_READY) {
+        ESP_LOGE(PIPELINE_TAG, "no RTL-SDR device within %dms (state=%s)",
+                 ENUM_TIMEOUT_TICK / portTICK_PERIOD_MS,
+                 esp_rtl_sdr_state_to_name(st));
+        /* Keep driver installed; a hotplug later may still attach. */
+        for (;;) {
+            xSemaphoreTake(s_ctx.fsm_sem, portMAX_DELAY);
+            if (esp_rtl_sdr_get_state(s_ctx.handle) == ESP_RTL_SDR_STATE_READY) {
+                break;
+            }
+        }
+    }
+
+    ret = esp_rtl_sdr_apply_need(s_ctx.handle, ESP_RTL_SDR_NEED_ADSB);
+    if (ret != ESP_OK) {
+        ESP_LOGE(PIPELINE_TAG, "apply_need failed: %s", esp_err_to_name(ret));
+    }
+
+    ret = esp_rtl_sdr_start(s_ctx.handle, &(esp_rtl_sdr_stream_config_t){
+        .struct_size = sizeof(esp_rtl_sdr_stream_config_t),
+        .preset = ESP_RTL_SDR_PRESET_CUSTOM_HZ,
+        .frequency_hz = ADSB_FREQ_HZ,
+        .sample_rate_sps = ADSB_RATE_SPS,
+        .max_bytes = 0,
+        .timeout_ms = 0,
+    });
+    if (ret != ESP_OK) {
+        ESP_LOGE(PIPELINE_TAG, "start failed: %s", esp_err_to_name(ret));
+        vTaskDelete(NULL);
+        return;
+    }
+    ESP_LOGI(PIPELINE_TAG, "streaming 1090 MHz @ 2.048 MSPS");
+
+    /* Park: react to disconnect / driver errors by logging for now. */
+    for (;;) {
+        xSemaphoreTake(s_ctx.fsm_sem, portMAX_DELAY);
+        if (!s_ctx.device_present) {
+            ESP_LOGW(PIPELINE_TAG, "device gone; waiting for re-attach...");
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            esp_rtl_sdr_refresh_device_list(s_ctx.handle);
+            size_t n = 0;
+            esp_rtl_sdr_get_device_count(s_ctx.handle, &n);
+            ESP_LOGI(PIPELINE_TAG, "device count=%u", (unsigned)n);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Public                                                              */
+/* ------------------------------------------------------------------ */
+
+esp_err_t rtl_pipeline_init(void)
+{
+    if (s_ctx.installed) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!ring_init()) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    BaseType_t ok = xTaskCreatePinnedToCore(rtl_driver_task, "rtl_driver",
+                                            4096, NULL, 5, NULL, 1);
+    if (ok != pdPASS) {
+        return ESP_FAIL;
+    }
+    ok = xTaskCreatePinnedToCore(status_task, "rtl_stat", 2048, NULL, 3, NULL, 1);
+    if (ok != pdPASS) {
+        return ESP_FAIL;
+    }
+    ok = xTaskCreatePinnedToCore(adsb_decoder_task, "adsb_dsp", 8192, NULL, 6, NULL, 1);
+    if (ok != pdPASS) {
+        return ESP_FAIL;
+    }
+    ESP_LOGI(PIPELINE_TAG, "tasks started (rtl_driver=core1, adsb_dsp=core1, rtl_stat=core1)");
+    return ESP_OK;
+}
+
+void rtl_pipeline_get_status(rtl_pipeline_status_t *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+    out->driver_started = s_ctx.started_req;
+    out->device_present = s_ctx.device_present;
+    out->decode_ok = s_ctx.decode_ok;
+    out->effective_sps = s_ctx.metrics.effective_sps;
+    out->overruns = s_ctx.metrics.overruns;
+    out->consumer_drops = s_ctx.metrics.consumer_drops;
+    out->ring_free = uxQueueMessagesWaiting(s_ctx.free_q);
+    out->frame_cnt = s_ctx.frame_cnt;
+    out->crc_ok = s_ctx.crc_ok;
+}
