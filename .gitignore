@@ -5,4 +5,5 @@ sdkconfig.old
 managed_components/
 .directory
 *.log
+*.bak
 .DS_Store
