@@ -77,6 +77,8 @@ void adsb_decoder_bridge_set_dc_filter(bool enable);
 
 void adsb_decoder_bridge_set_aggressive(bool enable);
 
+void adsb_decoder_bridge_set_crc_fix(bool enable);
+
 #ifdef __cplusplus
 }
 #endif

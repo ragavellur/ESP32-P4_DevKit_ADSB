@@ -33,6 +33,7 @@
 #define SETTINGS_KEY_ADAPTIVE_GAIN "adaptive_gain"
 #define SETTINGS_KEY_GAIN_MODE "gain_mode"
 #define SETTINGS_KEY_AGGRESSIVE "aggressive"
+#define SETTINGS_KEY_CRC_FIX "crc_fix"
 
 /* Default settings (match current hardcoded values) */
 #define DEFAULT_GAIN_TENTH_DB 496
@@ -40,6 +41,7 @@
 #define DEFAULT_ADAPTIVE_GAIN false
 #define DEFAULT_GAIN_MODE 0  /* 0=manual, 1=adaptive */
 #define DEFAULT_AGGRESSIVE false
+#define DEFAULT_CRC_FIX false
 
 /* Adaptive gain parameters */
 #define ADAPTIVE_GAIN_HYSTERESIS_S 3
@@ -99,6 +101,7 @@ typedef struct {
     bool adaptive_gain;
     gain_mode_t gain_mode;
     bool aggressive;
+    bool crc_fix;
 } radar_settings_t;
 
 static radar_settings_t s_settings;
@@ -201,6 +204,9 @@ static void settings_load(void)
     if (nvs_get_u8(h, SETTINGS_KEY_AGGRESSIVE, &val8) == ESP_OK) {
         s_settings.aggressive = val8 != 0;
     }
+    if (nvs_get_u8(h, SETTINGS_KEY_CRC_FIX, &val8) == ESP_OK) {
+        s_settings.crc_fix = val8 != 0;
+    }
     nvs_close(h);
     return;
 defaults:
@@ -209,6 +215,7 @@ defaults:
     s_settings.adaptive_gain = DEFAULT_ADAPTIVE_GAIN;
     s_settings.gain_mode = DEFAULT_GAIN_MODE;
     s_settings.aggressive = DEFAULT_AGGRESSIVE;
+    s_settings.crc_fix = DEFAULT_CRC_FIX;
 }
 
 static void settings_save(void)
@@ -222,6 +229,7 @@ static void settings_save(void)
     nvs_set_u8(h, SETTINGS_KEY_ADAPTIVE_GAIN, s_settings.adaptive_gain ? 1 : 0);
     nvs_set_u8(h, SETTINGS_KEY_GAIN_MODE, (uint8_t)s_settings.gain_mode);
     nvs_set_u8(h, SETTINGS_KEY_AGGRESSIVE, s_settings.aggressive ? 1 : 0);
+    nvs_set_u8(h, SETTINGS_KEY_CRC_FIX, s_settings.crc_fix ? 1 : 0);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -241,8 +249,10 @@ static void settings_apply_initial(void)
                  s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10);
     }
     ESP_LOGI(PIPELINE_TAG, "Aggressive mode: %s", s_settings.aggressive ? "ON" : "OFF");
+    ESP_LOGI(PIPELINE_TAG, "CRC fix: %s", s_settings.crc_fix ? "ON" : "OFF");
     (void)esp_rtl_sdr_set_tuner_gain_mode(s_ctx.handle, ESP_RTL_SDR_GAIN_MODE_MANUAL);
     (void)esp_rtl_sdr_set_tuner_gain(s_ctx.handle, s_settings.gain_tenth_db);
+    adsb_decoder_bridge_set_crc_fix(s_settings.crc_fix);
 }
 
 /* Find nearest gain ladder index for current gain setting */
@@ -665,11 +675,13 @@ esp_err_t rtl_pipeline_init(void)
 
     /* Load persistent settings from NVS */
     settings_load();
-    ESP_LOGI(PIPELINE_TAG, "Settings loaded: gain=%d.%d dB, dc_filter=%s, adaptive_gain=%s, gain_mode=%s",
+    ESP_LOGI(PIPELINE_TAG, "Settings loaded: gain=%d.%d dB, dc_filter=%s, adaptive_gain=%s, gain_mode=%s, aggressive=%s, crc_fix=%s",
              s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10,
              s_settings.dc_filter ? "ON" : "OFF",
              s_settings.adaptive_gain ? "ON" : "OFF",
-             s_settings.gain_mode == GAIN_MODE_ADAPTIVE ? "adaptive" : "manual");
+             s_settings.gain_mode == GAIN_MODE_ADAPTIVE ? "adaptive" : "manual",
+             s_settings.aggressive ? "ON" : "OFF",
+             s_settings.crc_fix ? "ON" : "OFF");
 
     BaseType_t ok = xTaskCreatePinnedToCore(rtl_driver_task, "rtl_driver",
                                             4096, NULL, 5, NULL, 1);
@@ -735,5 +747,8 @@ esp_err_t rtl_pipeline_apply_settings(void)
     /* Apply aggressive mode */
     adsb_decoder_bridge_set_aggressive(s_settings.aggressive);
     ESP_LOGI(PIPELINE_TAG, "Aggressive mode: %s", s_settings.aggressive ? "ON" : "OFF");
+    /* Apply CRC fix */
+    adsb_decoder_bridge_set_crc_fix(s_settings.crc_fix);
+    ESP_LOGI(PIPELINE_TAG, "CRC fix: %s", s_settings.crc_fix ? "ON" : "OFF");
     return ESP_OK;
 }

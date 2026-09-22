@@ -98,6 +98,32 @@ bool parse(const uint8_t* bytes, uint8_t bit_length, uint16_t signal, Frame* out
   return true;
 }
 
+// Try to fix single-bit CRC error by flipping each bit
+bool try_crc_fix(uint8_t* bytes, int bit_length, Frame* out) {
+  uint8_t original[14];
+  std::memcpy(original, bytes, bit_length / 8);
+  
+  for (int bit = 0; bit < bit_length; ++bit) {
+    // Flip bit
+    bytes[bit / 8] ^= (0x80u >> (bit % 8));
+    
+    // Check CRC
+    const uint8_t df = bytes[0] >> 3;
+    const int data_bits = bit_length - 24;
+    const uint32_t syndrome = crc_payload(bytes, data_bits) ^ bits(bytes, data_bits, 24);
+    
+    if ((df == 17 && bit_length == 112 && syndrome == 0) ||
+        (df == 11 && bit_length == 56 && syndrome <= 0x7f)) {
+      // CRC fixed! Parse the corrected frame
+      return parse(bytes, bit_length, 0, out);
+    }
+    
+    // Restore and try next bit
+    std::memcpy(bytes, original, bit_length / 8);
+  }
+  return false;
+}
+
 }  // namespace
 
 bool decode_global_cpr(const Frame& first, const Frame& second, bool use_odd,
@@ -161,6 +187,10 @@ void Decoder::set_dc_filter(bool enable) {
 
 void Decoder::set_aggressive(bool enable) {
   aggressive_ = enable;
+}
+
+void Decoder::set_crc_fix(bool enable) {
+  crc_fix_enabled_ = enable;
 }
 
 void Decoder::process_cu8(const uint8_t* data, size_t bytes, FrameCallback callback,
@@ -228,6 +258,16 @@ void Decoder::process_cu8(const uint8_t* data, size_t bytes, FrameCallback callb
         valid = true;
         valid_bits = frame_bits;
         break;
+      }
+      // Try single-bit CRC fix if enabled
+      if (crc_fix_enabled_) {
+        uint8_t frame_copy[14];
+        std::memcpy(frame_copy, frame, frame_bits / 8);
+        if (try_crc_fix(frame_copy, frame_bits, &decoded)) {
+          valid = true;
+          valid_bits = frame_bits;
+          break;
+        }
       }
     }
     if (saw_df17) ++stats_.df17;

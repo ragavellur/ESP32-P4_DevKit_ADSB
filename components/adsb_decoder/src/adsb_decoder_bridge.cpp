@@ -161,3 +161,8 @@ void adsb_decoder_bridge_set_aggressive(bool enable)
 {
     s_dec.set_aggressive(enable);
 }
+
+void adsb_decoder_bridge_set_crc_fix(bool enable)
+{
+    s_dec.set_crc_fix(enable);
+}
