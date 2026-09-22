@@ -48,7 +48,7 @@ static constexpr size_t kCtrlXferBytes = 64 + sizeof(usb_setup_packet_t);
 /* Named runtime constants — see docs/RUNTIME_CONSTANTS.md (not Kconfig yet). */
 static constexpr size_t kRingDepth = 6;       /* IQ free/filled queue depth */
 static constexpr int kUsbCore = 0;            /* default USB owner core (P4) */
-static constexpr int kDeliveryCore = 0;       /* IQ event delivery core */
+static constexpr int kDeliveryCore = 1;       /* IQ event delivery core */
 static constexpr UBaseType_t kUsbPrio = 20;
 static constexpr UBaseType_t kClientPrio = 19;
 /* Delivery only posts IQ; app audio task should be >= this and graphics much lower. */

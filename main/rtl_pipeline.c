@@ -546,7 +546,7 @@ static void rtl_driver_task(void *arg)
     esp_rtl_sdr_config_default(&cfg);
     cfg.host_library_already_installed = false;
     cfg.transfer_bytes = IQ_BLOCK_BYTES;
-    cfg.transfer_count = 3;
+    cfg.transfer_count = 6;  /* 6 URBs × 32 KiB = 192 KiB buffer pool (47 ms @ 4.1 MB/s) */
     cfg.event_cb = on_event;
     cfg.event_ctx = NULL;
     cfg.usb_task_priority = 20;
@@ -656,7 +656,7 @@ esp_err_t rtl_pipeline_init(void)
              s_settings.gain_mode == GAIN_MODE_ADAPTIVE ? "adaptive" : "manual");
 
     BaseType_t ok = xTaskCreatePinnedToCore(rtl_driver_task, "rtl_driver",
-                                            4096, NULL, 5, NULL, 0);
+                                            4096, NULL, 5, NULL, 1);
     if (ok != pdPASS) {
         return ESP_FAIL;
     }
@@ -669,7 +669,7 @@ esp_err_t rtl_pipeline_init(void)
     if (ok != pdPASS) {
         return ESP_FAIL;
     }
-    ESP_LOGI(PIPELINE_TAG, "tasks started (rtl_driver=core0, adsb_dsp=core1, rtl_stat=core1)");
+    ESP_LOGI(PIPELINE_TAG, "tasks started (rtl_driver=core1, adsb_dsp=core1, rtl_stat=core1)");
     return ESP_OK;
 }
 
