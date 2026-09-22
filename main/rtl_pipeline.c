@@ -19,9 +19,6 @@
 #define DSP_TAG "adsb_dsp"
 #define STATUS_TAG "rtl_stat"
 
-/* IQ ring geometry (CU8). 8 * 32 KiB = 256 KiB in PSRAM. */
-#define IQ_BLOCK_BYTES (32 * 1024)
-
 #define ADSB_FREQ_HZ 1090000000u
 #define ADSB_RATE_SPS 2048000u
 
@@ -504,6 +501,16 @@ static void status_task(void *arg)
             if (esp_rtl_sdr_get_health(s_ctx.handle, &health) == ESP_OK) {
                 adaptive_gain_step(&health);
             }
+        } else if (s_settings.gain_mode == GAIN_MODE_MANUAL) {
+            /* Apply manual gain changes from web API */
+            static int last_applied_gain = -1;
+            if (s_settings.gain_tenth_db != last_applied_gain) {
+                (void)esp_rtl_sdr_set_tuner_gain_mode(s_ctx.handle, ESP_RTL_SDR_GAIN_MODE_MANUAL);
+                (void)esp_rtl_sdr_set_tuner_gain(s_ctx.handle, s_settings.gain_tenth_db);
+                ESP_LOGI(STATUS_TAG, "Manual gain applied: %d.%d dB",
+                         s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10);
+                last_applied_gain = s_settings.gain_tenth_db;
+            }
         }
 
         /* 1 Hz track-store maintenance + count for status queries */
@@ -545,8 +552,8 @@ static void rtl_driver_task(void *arg)
     esp_rtl_sdr_config_t cfg;
     esp_rtl_sdr_config_default(&cfg);
     cfg.host_library_already_installed = false;
-    cfg.transfer_bytes = IQ_BLOCK_BYTES;
-    cfg.transfer_count = 6;  /* 6 URBs × 32 KiB = 192 KiB buffer pool (47 ms @ 4.1 MB/s) */
+    cfg.transfer_bytes = 65536;  /* 64 KiB URBs (multiple of 512) - 8 URBs × 64 KiB = 512 KiB pool (~125ms @ 4 MB/s) */
+    cfg.transfer_count = 8;    /* 8 URBs (ESP_RTL_SDR_MAX_XFER_COUNT) */
     cfg.event_cb = on_event;
     cfg.event_ctx = NULL;
     cfg.usb_task_priority = 20;
@@ -696,4 +703,25 @@ uint32_t rtl_pipeline_fill_aircraft(adsb_aircraft_t *out, uint32_t cap)
     uint32_t n = adsb_state_fill(out, cap);
     if (s_ctx.track_mutex) xSemaphoreGive(s_ctx.track_mutex);
     return n;
+}
+
+esp_err_t rtl_pipeline_apply_settings(void)
+{
+    if (!s_ctx.handle) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* Apply gain mode and value */
+    if (s_settings.gain_mode == GAIN_MODE_MANUAL) {
+        (void)esp_rtl_sdr_set_tuner_gain_mode(s_ctx.handle, ESP_RTL_SDR_GAIN_MODE_MANUAL);
+        (void)esp_rtl_sdr_set_tuner_gain(s_ctx.handle, s_settings.gain_tenth_db);
+        ESP_LOGI(PIPELINE_TAG, "Manual gain applied via API: %d.%d dB",
+                 s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10);
+    } else {
+        /* Adaptive mode: driver will adjust based on health */
+        ESP_LOGI(PIPELINE_TAG, "Adaptive gain mode enabled via API");
+    }
+    /* Apply DC filter */
+    adsb_decoder_bridge_set_dc_filter(s_settings.dc_filter);
+    ESP_LOGI(PIPELINE_TAG, "DC filter: %s", s_settings.dc_filter ? "ON" : "OFF");
+    return ESP_OK;
 }

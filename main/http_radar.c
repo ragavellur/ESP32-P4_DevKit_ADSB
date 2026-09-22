@@ -318,7 +318,6 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     }
     if (dc_filter != -1) {
         nvs_set_u8(h, SETTINGS_KEY_DC_FILTER, dc_filter);
-        adsb_decoder_bridge_set_dc_filter(dc_filter);
     }
     if (adaptive_gain != -1) {
         nvs_set_u8(h, SETTINGS_KEY_ADAPTIVE_GAIN, adaptive_gain);
@@ -329,8 +328,9 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     nvs_commit(h);
     nvs_close(h);
 
-    /* Gain change will be picked up by status task on next cycle (if adaptive off)
-     * or user can restart. */
+    /* Apply settings immediately via pipeline API */
+    extern esp_err_t rtl_pipeline_apply_settings(void);
+    rtl_pipeline_apply_settings();
 
     /* Return updated settings */
     char resp[512];

@@ -2788,6 +2788,9 @@ esp_err_t esp_rtl_sdr_start(esp_rtl_sdr_handle_t handle,
         handle->last_emitted_health = ESP_RTL_SDR_HEALTH_UNKNOWN;
         handle->streaming = true;
 
+        /* Staggered URB submission: submit with small delays to smooth pipeline fill
+         * and avoid the 40% -> 90% efficiency spike at startup when all URBs are
+         * submitted simultaneously. 5 ms stagger per URB = 40 ms total for 8 URBs. */
         for (uint32_t i = 0; i < handle->bulk_num; ++i) {
             ret = usb_host_transfer_submit(handle->bulk[i]);
             if (ret != ESP_OK) {
@@ -2796,6 +2799,9 @@ esp_err_t esp_rtl_sdr_start(esp_rtl_sdr_handle_t handle,
                 break;
             }
             handle->live_urbs = handle->live_urbs + 1;
+            if (i + 1 < handle->bulk_num) {
+                vTaskDelay(pdMS_TO_TICKS(5));  // stagger next submission
+            }
         }
         if (ret != ESP_OK) {
             break;

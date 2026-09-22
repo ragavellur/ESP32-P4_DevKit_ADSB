@@ -24,7 +24,7 @@ extern "C" {
  */
 
 /* IQ slot geometry (PSRAM). CU8 interleaved. */
-#define IQ_BLOCK_BYTES (32 * 1024)
+#define IQ_BLOCK_BYTES (64 * 1024)
 #define IQ_RING_SLOTS 8u
 
 typedef enum {
@@ -59,6 +59,10 @@ void rtl_pipeline_get_status(rtl_pipeline_status_t *out);
 
 /* Snapshot up to cap live aircraft tracks (mutex-guarded). Returns count. */
 uint32_t rtl_pipeline_fill_aircraft(adsb_aircraft_t *out, uint32_t cap);
+
+/* Apply current settings (gain, gain_mode, dc_filter) to driver/decoder.
+ * Called from web API after NVS update for immediate effect. */
+esp_err_t rtl_pipeline_apply_settings(void);
 
 #ifdef __cplusplus
 }
