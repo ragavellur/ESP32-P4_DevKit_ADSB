@@ -8,7 +8,9 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 
+#include "adsb_decoder_bridge.h"
 #include "adsb_state.h"
+#include "esp_rtl_sdr.h"
 #include "http_radar.h"
 #include "rtl_pipeline.h"
 
@@ -168,14 +170,220 @@ static esp_err_t h_status_json(httpd_req_t *req)
     return httpd_resp_send(req, buf, strlen(buf));
 }
 
+/* ----- Settings API ----- */
+
+#define SETTINGS_NS "radar"
+#define SETTINGS_KEY_GAIN "gain_tenth_db"
+#define SETTINGS_KEY_DC_FILTER "dc_filter"
+#define SETTINGS_KEY_ADAPTIVE_GAIN "adaptive_gain"
+#define SETTINGS_KEY_GAIN_MODE "gain_mode"
+
+#define DEFAULT_GAIN_TENTH_DB 496
+#define DEFAULT_DC_FILTER false
+#define DEFAULT_ADAPTIVE_GAIN false
+#define DEFAULT_GAIN_MODE 0  /* 0=manual, 1=adaptive */
+
+static void settings_json_response(char *buf, size_t cap,
+                                   int gain, bool dc_filter, bool adaptive_gain, int gain_mode)
+{
+    const char *mode_str = (gain_mode == 1) ? "adaptive" : "manual";
+    snprintf(buf, cap,
+        "{"
+        "\"gain\":%d,"
+        "\"dc_filter\":%s,"
+        "\"adaptive_gain\":%s,"
+        "\"gain_mode\":\"%s\","
+        "\"defaults\":{"
+            "\"gain\":%d,"
+            "\"dc_filter\":%s,"
+            "\"adaptive_gain\":%s,"
+            "\"gain_mode\":\"%s\""
+        "}"
+        "}",
+        gain,
+        dc_filter ? "true" : "false",
+        adaptive_gain ? "true" : "false",
+        mode_str,
+        DEFAULT_GAIN_TENTH_DB,
+        DEFAULT_DC_FILTER ? "true" : "false",
+        DEFAULT_ADAPTIVE_GAIN ? "true" : "false",
+        (DEFAULT_GAIN_MODE == 1) ? "adaptive" : "manual");
+}
+
+static esp_err_t h_settings_get(httpd_req_t *req)
+{
+    /* Read current settings from NVS (or defaults) */
+    nvs_handle_t h;
+    int32_t gain = DEFAULT_GAIN_TENTH_DB;
+    uint8_t dc_filter = DEFAULT_DC_FILTER;
+    uint8_t adaptive_gain = DEFAULT_ADAPTIVE_GAIN;
+    uint8_t gain_mode = DEFAULT_GAIN_MODE;
+
+    if (nvs_open(SETTINGS_NS, NVS_READONLY, &h) == ESP_OK) {
+        nvs_get_i32(h, SETTINGS_KEY_GAIN, &gain);
+        nvs_get_u8(h, SETTINGS_KEY_DC_FILTER, &dc_filter);
+        nvs_get_u8(h, SETTINGS_KEY_ADAPTIVE_GAIN, &adaptive_gain);
+        nvs_get_u8(h, SETTINGS_KEY_GAIN_MODE, &gain_mode);
+        nvs_close(h);
+    }
+
+    char buf[512];
+    settings_json_response(buf, sizeof(buf), gain, dc_filter != 0, adaptive_gain != 0, gain_mode);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, buf, strlen(buf));
+}
+
+static esp_err_t h_settings_post(httpd_req_t *req)
+{
+    /* Parse JSON body */
+    int content_len = req->content_len;
+    if (content_len <= 0 || content_len > 1024) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid content length");
+        return ESP_FAIL;
+    }
+
+    char *buf = malloc(content_len + 1);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+
+    int received = httpd_req_recv(req, buf, content_len);
+    if (received <= 0) {
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
+        return ESP_FAIL;
+    }
+    buf[received] = '\0';
+
+    /* Simple JSON parsing for our known fields */
+    int gain = -1;
+    int dc_filter = -1;
+    int adaptive_gain = -1;
+    int gain_mode = -1;
+
+    char *p = strstr(buf, "\"gain\"");
+    if (p) {
+        p = strchr(p, ':');
+        if (p) gain = atoi(p + 1);
+    }
+    p = strstr(buf, "\"dc_filter\"");
+    if (p) {
+        p = strchr(p, ':');
+        if (p) {
+            if (strstr(p, "true")) dc_filter = 1;
+            else if (strstr(p, "false")) dc_filter = 0;
+        }
+    }
+    p = strstr(buf, "\"adaptive_gain\"");
+    if (p) {
+        p = strchr(p, ':');
+        if (p) {
+            if (strstr(p, "true")) adaptive_gain = 1;
+            else if (strstr(p, "false")) adaptive_gain = 0;
+        }
+    }
+    p = strstr(buf, "\"gain_mode\"");
+    if (p) {
+        p = strchr(p, ':');
+        if (p) {
+            if (strstr(p, "adaptive")) gain_mode = 1;
+            else if (strstr(p, "manual")) gain_mode = 0;
+        }
+    }
+    free(buf);
+
+    /* Validate */
+    if (gain != -1 && (gain < 0 || gain > 496)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "gain must be 0-496");
+        return ESP_FAIL;
+    }
+    if (gain_mode != -1 && (gain_mode < 0 || gain_mode > 1)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "gain_mode must be 0 (manual) or 1 (adaptive)");
+        return ESP_FAIL;
+    }
+
+    /* Apply and save */
+    nvs_handle_t h;
+    if (nvs_open(SETTINGS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS open failed");
+        return ESP_FAIL;
+    }
+
+    if (gain != -1) {
+        nvs_set_i32(h, SETTINGS_KEY_GAIN, gain);
+    }
+    if (dc_filter != -1) {
+        nvs_set_u8(h, SETTINGS_KEY_DC_FILTER, dc_filter);
+        adsb_decoder_bridge_set_dc_filter(dc_filter);
+    }
+    if (adaptive_gain != -1) {
+        nvs_set_u8(h, SETTINGS_KEY_ADAPTIVE_GAIN, adaptive_gain);
+    }
+    if (gain_mode != -1) {
+        nvs_set_u8(h, SETTINGS_KEY_GAIN_MODE, gain_mode);
+    }
+    nvs_commit(h);
+    nvs_close(h);
+
+    /* Gain change will be picked up by status task on next cycle (if adaptive off)
+     * or user can restart. */
+
+    /* Return updated settings */
+    char resp[512];
+    int cur_gain = (gain != -1) ? gain : DEFAULT_GAIN_TENTH_DB;
+    bool cur_dc = (dc_filter != -1) ? dc_filter : DEFAULT_DC_FILTER;
+    bool cur_adaptive = (adaptive_gain != -1) ? adaptive_gain : DEFAULT_ADAPTIVE_GAIN;
+    int cur_mode = (gain_mode != -1) ? gain_mode : DEFAULT_GAIN_MODE;
+    settings_json_response(resp, sizeof(resp), cur_gain, cur_dc, cur_adaptive, cur_mode);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
+static esp_err_t h_settings_reset(httpd_req_t *req)
+{
+    nvs_handle_t h;
+    if (nvs_open(SETTINGS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "NVS open failed");
+        return ESP_FAIL;
+    }
+    nvs_erase_key(h, SETTINGS_KEY_GAIN);
+    nvs_erase_key(h, SETTINGS_KEY_DC_FILTER);
+    nvs_erase_key(h, SETTINGS_KEY_ADAPTIVE_GAIN);
+    nvs_erase_key(h, SETTINGS_KEY_GAIN_MODE);
+    nvs_commit(h);
+    nvs_close(h);
+
+    /* Apply defaults immediately */
+    adsb_decoder_bridge_set_dc_filter(DEFAULT_DC_FILTER);
+    /* Gain will be picked up by status task on next cycle */
+
+    char resp[512];
+    settings_json_response(resp, sizeof(resp),
+                           DEFAULT_GAIN_TENTH_DB, DEFAULT_DC_FILTER,
+                           DEFAULT_ADAPTIVE_GAIN, DEFAULT_GAIN_MODE);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, resp, strlen(resp));
+}
+
 esp_err_t http_radar_start(void)
 {
     nvs_load_receiver();
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 8;
+    cfg.max_uri_handlers = 12;
     cfg.lru_purge_enable = true;
+    cfg.core_id = 0;  /* Pin httpd to core 0 */
 
     httpd_handle_t server = NULL;
     esp_err_t e = httpd_start(&server, &cfg);
@@ -198,15 +406,30 @@ esp_err_t http_radar_start(void)
         .uri = "/api/status", .method = HTTP_GET,
         .handler = h_status_json, .user_ctx = NULL
     };
+    const httpd_uri_t r_settings_get = {
+        .uri = "/api/settings", .method = HTTP_GET,
+        .handler = h_settings_get, .user_ctx = NULL
+    };
+    const httpd_uri_t r_settings_post = {
+        .uri = "/api/settings", .method = HTTP_POST,
+        .handler = h_settings_post, .user_ctx = NULL
+    };
+    const httpd_uri_t r_settings_reset = {
+        .uri = "/api/settings/reset", .method = HTTP_POST,
+        .handler = h_settings_reset, .user_ctx = NULL
+    };
     if (httpd_register_uri_handler(server, &r_radar)  != ESP_OK ||
         httpd_register_uri_handler(server, &r_root)   != ESP_OK ||
         httpd_register_uri_handler(server, &r_feed)   != ESP_OK ||
-        httpd_register_uri_handler(server, &r_status) != ESP_OK) {
+        httpd_register_uri_handler(server, &r_status) != ESP_OK ||
+        httpd_register_uri_handler(server, &r_settings_get)  != ESP_OK ||
+        httpd_register_uri_handler(server, &r_settings_post) != ESP_OK ||
+        httpd_register_uri_handler(server, &r_settings_reset) != ESP_OK) {
         ESP_LOGE(TAG, "uri registration failed");
         httpd_stop(server);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "server up: / /radar /data/aircraft.json /api/status");
+    ESP_LOGI(TAG, "server up: / /radar /data/aircraft.json /api/status /api/settings");
     return ESP_OK;
 }

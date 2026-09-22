@@ -42,17 +42,22 @@ struct Stats {
 using FrameCallback = void (*)(const Frame&, void*);
 
 class Decoder {
- public:
-  void reset();
-  void process_cu8(const uint8_t* data, size_t bytes, FrameCallback callback, void* context);
-  const Stats& stats() const { return stats_; }
- static bool self_check();
+  public:
+    void reset();
+    void process_cu8(const uint8_t* data, size_t bytes, FrameCallback callback, void* context);
+    const Stats& stats() const { return stats_; }
+    static bool self_check();
+    void set_dc_filter(bool enable);
 
- private:
-  static constexpr size_t kMagnitudeCapacity = 16640;
-  uint16_t magnitudes_[kMagnitudeCapacity]{};
-  size_t overlap_ = 0;
-  Stats stats_{};
+  private:
+    static constexpr size_t kMagnitudeCapacity = 16640;
+    uint16_t magnitudes_[kMagnitudeCapacity]{};
+    size_t overlap_ = 0;
+    Stats stats_{};
+    bool dc_filter_enabled_ = false;
+    int32_t dc_i_accum_ = 0;
+    int32_t dc_q_accum_ = 0;
+    uint32_t dc_sample_count_ = 0;
 };
 
 }  // namespace adsb_radar::adsb_rx

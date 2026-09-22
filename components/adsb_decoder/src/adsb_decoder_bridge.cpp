@@ -151,3 +151,8 @@ bool adsb_decoder_bridge_cpr_pair(const adsb_cpr_sample_t *even,
     b.has_cpr = true;
     return decode_global_cpr(a, b, use_odd, latitude, longitude);
 }
+
+void adsb_decoder_bridge_set_dc_filter(bool enable)
+{
+    s_dec.set_dc_filter(enable);
+}

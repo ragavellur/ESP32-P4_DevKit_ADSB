@@ -145,6 +145,18 @@ bool decode_global_cpr(const Frame& first, const Frame& second, bool use_odd,
 void Decoder::reset() {
   overlap_ = 0;
   stats_ = {};
+  dc_i_accum_ = 0;
+  dc_q_accum_ = 0;
+  dc_sample_count_ = 0;
+}
+
+void Decoder::set_dc_filter(bool enable) {
+  dc_filter_enabled_ = enable;
+  if (enable) {
+    dc_i_accum_ = 0;
+    dc_q_accum_ = 0;
+    dc_sample_count_ = 0;
+  }
 }
 
 void Decoder::process_cu8(const uint8_t* data, size_t bytes, FrameCallback callback,
@@ -153,8 +165,16 @@ void Decoder::process_cu8(const uint8_t* data, size_t bytes, FrameCallback callb
   bytes &= ~size_t{1};
   size_t count = overlap_;
   for (size_t i = 0; i < bytes; i += 2) {
-    const int iv = static_cast<int>(data[i]) - 127;
-    const int qv = static_cast<int>(data[i + 1]) - 127;
+    int iv = static_cast<int>(data[i]) - 127;
+    int qv = static_cast<int>(data[i + 1]) - 127;
+    if (dc_filter_enabled_) {
+      dc_i_accum_ += (iv - (dc_i_accum_ >> 12));
+      dc_q_accum_ += (qv - (dc_q_accum_ >> 12));
+      int dc_i = dc_i_accum_ >> 12;
+      int dc_q = dc_q_accum_ >> 12;
+      iv -= dc_i;
+      qv -= dc_q;
+    }
     if (count < kMagnitudeCapacity) {
       const uint16_t magnitude = static_cast<uint16_t>(std::abs(iv) + std::abs(qv));
       stats_.magnitude_min = std::min(stats_.magnitude_min, magnitude);

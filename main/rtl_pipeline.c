@@ -1,5 +1,6 @@
 #include "rtl_pipeline.h"
 
+#include <limits.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
@@ -12,6 +13,7 @@
 #include "adsb_decoder_bridge.h"
 #include "adsb_state.h"
 #include "esp_log.h"
+#include "nvs.h"
 
 #define PIPELINE_TAG "rtl_pipe"
 #define DSP_TAG "adsb_dsp"
@@ -26,6 +28,80 @@
 /* Waiting for a device/state change. */
 #define DEVICE_WAIT_TICK pdMS_TO_TICKS(500)
 #define ENUM_TIMEOUT_TICK pdMS_TO_TICKS(20000)
+
+/* Settings NVS namespace and keys */
+#define SETTINGS_NS "radar"
+#define SETTINGS_KEY_GAIN "gain_tenth_db"
+#define SETTINGS_KEY_DC_FILTER "dc_filter"
+#define SETTINGS_KEY_ADAPTIVE_GAIN "adaptive_gain"
+#define SETTINGS_KEY_GAIN_MODE "gain_mode"
+
+/* Default settings (match current hardcoded values) */
+#define DEFAULT_GAIN_TENTH_DB 496
+#define DEFAULT_DC_FILTER false
+#define DEFAULT_ADAPTIVE_GAIN false
+#define DEFAULT_GAIN_MODE 0  /* 0=manual, 1=adaptive */
+
+/* Adaptive gain parameters */
+#define ADAPTIVE_GAIN_HYSTERESIS_S 3
+#define ADAPTIVE_GAIN_STEP 1  /* ladder index step */
+
+/* Local copy of R820T2 gain ladder (matches components/esp_rtl_sdr/private/gain_r820t2.hpp) */
+typedef struct {
+    int tenth_db;
+    uint8_t reg05;
+    uint8_t reg07;
+} r820t2_gain_step_t;
+
+static const r820t2_gain_step_t s_gain_ladder[] = {
+    {0,   0x90, 0x60},
+    {9,   0x91, 0x60},
+    {14,  0x91, 0x61},
+    {27,  0x92, 0x61},
+    {37,  0x92, 0x62},
+    {77,  0x93, 0x62},
+    {87,  0x93, 0x63},
+    {125, 0x94, 0x63},
+    {144, 0x94, 0x64},
+    {157, 0x95, 0x64},
+    {166, 0x95, 0x65},
+    {197, 0x96, 0x65},
+    {207, 0x96, 0x66},
+    {229, 0x97, 0x66},
+    {254, 0x97, 0x67},
+    {280, 0x98, 0x67},
+    {297, 0x98, 0x68},
+    {328, 0x99, 0x68},
+    {338, 0x99, 0x69},
+    {364, 0x9a, 0x69},
+    {372, 0x9a, 0x6a},
+    {386, 0x9b, 0x6a},
+    {402, 0x9b, 0x6b},
+    {421, 0x9c, 0x6b},
+    {434, 0x9c, 0x6c},
+    {439, 0x9d, 0x6c},
+    {445, 0x9d, 0x6d},
+    {480, 0x9e, 0x6d},
+    {496, 0x9f, 0x6e},
+};
+
+#define S_GAIN_LADDER_COUNT (sizeof(s_gain_ladder) / sizeof(s_gain_ladder[0]))
+
+/* Gain mode enum */
+typedef enum {
+    GAIN_MODE_MANUAL = 0,
+    GAIN_MODE_ADAPTIVE = 1,
+} gain_mode_t;
+
+/* Persistent settings */
+typedef struct {
+    int gain_tenth_db;
+    bool dc_filter;
+    bool adaptive_gain;
+    gain_mode_t gain_mode;
+} radar_settings_t;
+
+static radar_settings_t s_settings;
 
 typedef struct {
     uint8_t *data;
@@ -95,6 +171,128 @@ static void ring_give_filled(uint32_t idx)
 {
     if (xQueueSend(s_ctx.filled_q, &idx, 0) != pdTRUE) {
         xQueueSend(s_ctx.free_q, &idx, 0); /* drop: put back */
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Settings (NVS)                                                      */
+/* ------------------------------------------------------------------ */
+
+static void settings_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(SETTINGS_NS, NVS_READONLY, &h) != ESP_OK) {
+        goto defaults;
+    }
+    int32_t val32;
+    if (nvs_get_i32(h, SETTINGS_KEY_GAIN, &val32) == ESP_OK) {
+        s_settings.gain_tenth_db = val32;
+    }
+    uint8_t val8;
+    if (nvs_get_u8(h, SETTINGS_KEY_DC_FILTER, &val8) == ESP_OK) {
+        s_settings.dc_filter = val8 != 0;
+    }
+    if (nvs_get_u8(h, SETTINGS_KEY_ADAPTIVE_GAIN, &val8) == ESP_OK) {
+        s_settings.adaptive_gain = val8 != 0;
+    }
+    if (nvs_get_u8(h, SETTINGS_KEY_GAIN_MODE, &val8) == ESP_OK) {
+        s_settings.gain_mode = (gain_mode_t)val8;
+    }
+    nvs_close(h);
+    return;
+defaults:
+    s_settings.gain_tenth_db = DEFAULT_GAIN_TENTH_DB;
+    s_settings.dc_filter = DEFAULT_DC_FILTER;
+    s_settings.adaptive_gain = DEFAULT_ADAPTIVE_GAIN;
+    s_settings.gain_mode = DEFAULT_GAIN_MODE;
+}
+
+static void settings_save(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(SETTINGS_NS, NVS_READWRITE, &h) != ESP_OK) {
+        return;
+    }
+    nvs_set_i32(h, SETTINGS_KEY_GAIN, s_settings.gain_tenth_db);
+    nvs_set_u8(h, SETTINGS_KEY_DC_FILTER, s_settings.dc_filter ? 1 : 0);
+    nvs_set_u8(h, SETTINGS_KEY_ADAPTIVE_GAIN, s_settings.adaptive_gain ? 1 : 0);
+    nvs_set_u8(h, SETTINGS_KEY_GAIN_MODE, (uint8_t)s_settings.gain_mode);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void settings_apply_initial(void)
+{
+    /* Apply DC filter setting to decoder */
+    adsb_decoder_bridge_set_dc_filter(s_settings.dc_filter);
+    ESP_LOGI(PIPELINE_TAG, "DC filter: %s", s_settings.dc_filter ? "ON" : "OFF");
+
+    /* Apply initial gain mode and value */
+    if (s_settings.gain_mode == GAIN_MODE_ADAPTIVE) {
+        ESP_LOGI(PIPELINE_TAG, "Adaptive gain: ON (starting at %d.%d dB)",
+                 s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10);
+    } else {
+        ESP_LOGI(PIPELINE_TAG, "Manual gain: %d.%d dB",
+                 s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10);
+    }
+    (void)esp_rtl_sdr_set_tuner_gain_mode(s_ctx.handle, ESP_RTL_SDR_GAIN_MODE_MANUAL);
+    (void)esp_rtl_sdr_set_tuner_gain(s_ctx.handle, s_settings.gain_tenth_db);
+}
+
+/* Find nearest gain ladder index for current gain setting */
+static int gain_ladder_index(int gain_tenth_db)
+{
+    int best = 0;
+    int best_err = INT_MAX;
+    for (size_t i = 0; i < S_GAIN_LADDER_COUNT; ++i) {
+        int err = abs(gain_tenth_db - s_gain_ladder[i].tenth_db);
+        if (err < best_err) {
+            best_err = err;
+            best = i;
+        }
+    }
+    return best;
+}
+
+/* Adaptive gain step function */
+static void adaptive_gain_step(esp_rtl_sdr_health_info_t *health)
+{
+    if (s_settings.gain_mode != GAIN_MODE_ADAPTIVE) {
+        return;
+    }
+
+    static int stable_count = 0;
+    static int current_gain_idx = -1;
+
+    if (current_gain_idx < 0) {
+        current_gain_idx = gain_ladder_index(s_settings.gain_tenth_db);
+    }
+
+    bool need_down = (health->rf == ESP_RTL_SDR_HEALTH_RF_CLIPPING);
+    bool need_up = (health->rf == ESP_RTL_SDR_HEALTH_RF_WEAK);
+
+    if (need_down || need_up) {
+        stable_count++;
+        if (stable_count >= ADAPTIVE_GAIN_HYSTERESIS_S) {
+            if (need_down && current_gain_idx > 0) {
+                current_gain_idx--;
+                s_settings.gain_tenth_db = s_gain_ladder[current_gain_idx].tenth_db;
+                (void)esp_rtl_sdr_set_tuner_gain(s_ctx.handle, s_settings.gain_tenth_db);
+                ESP_LOGW(PIPELINE_TAG, "Adaptive gain: stepped down to %d.%d dB (clipping)",
+                         s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10);
+                settings_save();
+            } else if (need_up && current_gain_idx < (int)S_GAIN_LADDER_COUNT - 1) {
+                current_gain_idx++;
+                s_settings.gain_tenth_db = s_gain_ladder[current_gain_idx].tenth_db;
+                (void)esp_rtl_sdr_set_tuner_gain(s_ctx.handle, s_settings.gain_tenth_db);
+                ESP_LOGW(PIPELINE_TAG, "Adaptive gain: stepped up to %d.%d dB (weak)",
+                         s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10);
+                settings_save();
+            }
+            stable_count = 0;
+        }
+    } else {
+        stable_count = 0;
     }
 }
 
@@ -300,6 +498,14 @@ static void status_task(void *arg)
                  ds.decoder_df17, crc_now, crc_now - last_crc,
                  ds.decoder_magnitude_min, ds.decoder_magnitude_max);
 
+        /* Adaptive gain based on health */
+        if (s_ctx.handle && s_settings.gain_mode == GAIN_MODE_ADAPTIVE) {
+            esp_rtl_sdr_health_info_t health;
+            if (esp_rtl_sdr_get_health(s_ctx.handle, &health) == ESP_OK) {
+                adaptive_gain_step(&health);
+            }
+        }
+
         /* 1 Hz track-store maintenance + count for status queries */
         if (s_ctx.track_mutex) {
             xSemaphoreTake(s_ctx.track_mutex, portMAX_DELAY);
@@ -405,14 +611,8 @@ static void rtl_driver_task(void *arg)
     }
     ESP_LOGI(PIPELINE_TAG, "streaming 1090 MHz @ 2.048 MSPS");
 
-    /* 44 dB manual — the only setting that produced a decoder frame during
-     * soak (R820T2, NESDR Nano 2+). AUTO (proven-repo default) gave lower
-     * magnitudes here; this front-end wants a fixed mid-high manual gain. */
-    /* Max R820T2 manual gain (49.6 dB). Mirrors readsb --gain auto which lands
-     * near the top of the R820T2 ladder for ADS-B. */
-    (void)esp_rtl_sdr_set_tuner_gain_mode(s_ctx.handle,
-                                          ESP_RTL_SDR_GAIN_MODE_MANUAL);
-    (void)esp_rtl_sdr_set_tuner_gain(s_ctx.handle, 496); /* 49.6 dB max step */
+    /* Apply user settings (gain, DC filter, adaptive gain) */
+    settings_apply_initial();
 
     /* Park: react to disconnect / driver errors by logging for now. */
     for (;;) {
@@ -447,8 +647,16 @@ esp_err_t rtl_pipeline_init(void)
     adsb_state_init();
     adsb_state_set_cpr_pair(pair_cpr_global);
 
+    /* Load persistent settings from NVS */
+    settings_load();
+    ESP_LOGI(PIPELINE_TAG, "Settings loaded: gain=%d.%d dB, dc_filter=%s, adaptive_gain=%s, gain_mode=%s",
+             s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10,
+             s_settings.dc_filter ? "ON" : "OFF",
+             s_settings.adaptive_gain ? "ON" : "OFF",
+             s_settings.gain_mode == GAIN_MODE_ADAPTIVE ? "adaptive" : "manual");
+
     BaseType_t ok = xTaskCreatePinnedToCore(rtl_driver_task, "rtl_driver",
-                                            4096, NULL, 5, NULL, 1);
+                                            4096, NULL, 5, NULL, 0);
     if (ok != pdPASS) {
         return ESP_FAIL;
     }
@@ -461,7 +669,7 @@ esp_err_t rtl_pipeline_init(void)
     if (ok != pdPASS) {
         return ESP_FAIL;
     }
-    ESP_LOGI(PIPELINE_TAG, "tasks started (rtl_driver=core1, adsb_dsp=core1, rtl_stat=core1)");
+    ESP_LOGI(PIPELINE_TAG, "tasks started (rtl_driver=core0, adsb_dsp=core1, rtl_stat=core1)");
     return ESP_OK;
 }
 

@@ -73,6 +73,8 @@ bool adsb_decoder_bridge_cpr_pair(const adsb_cpr_sample_t* even,
                                   bool use_odd, double* latitude,
                                   double* longitude);
 
+void adsb_decoder_bridge_set_dc_filter(bool enable);
+
 #ifdef __cplusplus
 }
 #endif
