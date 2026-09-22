@@ -32,12 +32,14 @@
 #define SETTINGS_KEY_DC_FILTER "dc_filter"
 #define SETTINGS_KEY_ADAPTIVE_GAIN "adaptive_gain"
 #define SETTINGS_KEY_GAIN_MODE "gain_mode"
+#define SETTINGS_KEY_AGGRESSIVE "aggressive"
 
 /* Default settings (match current hardcoded values) */
 #define DEFAULT_GAIN_TENTH_DB 496
 #define DEFAULT_DC_FILTER false
 #define DEFAULT_ADAPTIVE_GAIN false
 #define DEFAULT_GAIN_MODE 0  /* 0=manual, 1=adaptive */
+#define DEFAULT_AGGRESSIVE false
 
 /* Adaptive gain parameters */
 #define ADAPTIVE_GAIN_HYSTERESIS_S 3
@@ -96,6 +98,7 @@ typedef struct {
     bool dc_filter;
     bool adaptive_gain;
     gain_mode_t gain_mode;
+    bool aggressive;
 } radar_settings_t;
 
 static radar_settings_t s_settings;
@@ -195,6 +198,9 @@ static void settings_load(void)
     if (nvs_get_u8(h, SETTINGS_KEY_GAIN_MODE, &val8) == ESP_OK) {
         s_settings.gain_mode = (gain_mode_t)val8;
     }
+    if (nvs_get_u8(h, SETTINGS_KEY_AGGRESSIVE, &val8) == ESP_OK) {
+        s_settings.aggressive = val8 != 0;
+    }
     nvs_close(h);
     return;
 defaults:
@@ -202,6 +208,7 @@ defaults:
     s_settings.dc_filter = DEFAULT_DC_FILTER;
     s_settings.adaptive_gain = DEFAULT_ADAPTIVE_GAIN;
     s_settings.gain_mode = DEFAULT_GAIN_MODE;
+    s_settings.aggressive = DEFAULT_AGGRESSIVE;
 }
 
 static void settings_save(void)
@@ -214,6 +221,7 @@ static void settings_save(void)
     nvs_set_u8(h, SETTINGS_KEY_DC_FILTER, s_settings.dc_filter ? 1 : 0);
     nvs_set_u8(h, SETTINGS_KEY_ADAPTIVE_GAIN, s_settings.adaptive_gain ? 1 : 0);
     nvs_set_u8(h, SETTINGS_KEY_GAIN_MODE, (uint8_t)s_settings.gain_mode);
+    nvs_set_u8(h, SETTINGS_KEY_AGGRESSIVE, s_settings.aggressive ? 1 : 0);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -232,6 +240,7 @@ static void settings_apply_initial(void)
         ESP_LOGI(PIPELINE_TAG, "Manual gain: %d.%d dB",
                  s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10);
     }
+    ESP_LOGI(PIPELINE_TAG, "Aggressive mode: %s", s_settings.aggressive ? "ON" : "OFF");
     (void)esp_rtl_sdr_set_tuner_gain_mode(s_ctx.handle, ESP_RTL_SDR_GAIN_MODE_MANUAL);
     (void)esp_rtl_sdr_set_tuner_gain(s_ctx.handle, s_settings.gain_tenth_db);
 }
@@ -723,5 +732,8 @@ esp_err_t rtl_pipeline_apply_settings(void)
     /* Apply DC filter */
     adsb_decoder_bridge_set_dc_filter(s_settings.dc_filter);
     ESP_LOGI(PIPELINE_TAG, "DC filter: %s", s_settings.dc_filter ? "ON" : "OFF");
+    /* Apply aggressive mode */
+    adsb_decoder_bridge_set_aggressive(s_settings.aggressive);
+    ESP_LOGI(PIPELINE_TAG, "Aggressive mode: %s", s_settings.aggressive ? "ON" : "OFF");
     return ESP_OK;
 }

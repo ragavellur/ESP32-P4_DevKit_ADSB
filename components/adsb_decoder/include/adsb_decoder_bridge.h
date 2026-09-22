@@ -75,6 +75,8 @@ bool adsb_decoder_bridge_cpr_pair(const adsb_cpr_sample_t* even,
 
 void adsb_decoder_bridge_set_dc_filter(bool enable);
 
+void adsb_decoder_bridge_set_aggressive(bool enable);
+
 #ifdef __cplusplus
 }
 #endif

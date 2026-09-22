@@ -156,3 +156,8 @@ void adsb_decoder_bridge_set_dc_filter(bool enable)
 {
     s_dec.set_dc_filter(enable);
 }
+
+void adsb_decoder_bridge_set_aggressive(bool enable)
+{
+    s_dec.set_aggressive(enable);
+}

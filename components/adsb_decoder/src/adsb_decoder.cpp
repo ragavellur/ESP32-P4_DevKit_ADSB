@@ -159,6 +159,10 @@ void Decoder::set_dc_filter(bool enable) {
   }
 }
 
+void Decoder::set_aggressive(bool enable) {
+  aggressive_ = enable;
+}
+
 void Decoder::process_cu8(const uint8_t* data, size_t bytes, FrameCallback callback,
                           void* context) {
   if (!data) return;
@@ -196,7 +200,10 @@ void Decoder::process_cu8(const uint8_t* data, size_t bytes, FrameCallback callb
         (sample[0] + sample[2] + sample[7] + sample[9]) / 4u);
     const uint16_t quiet = static_cast<uint16_t>(
         (sample[11] + sample[12] + sample[13] + sample[14] + sample[15]) / 5u);
-    if (pulse <= static_cast<uint32_t>(quiet) * 2u + 8u) continue;
+    const uint32_t threshold = aggressive_ ? 
+        (static_cast<uint32_t>(quiet) * 3u / 2u + 4u) :  // aggressive: 1.5x + 4
+        (static_cast<uint32_t>(quiet) * 2u + 8u);       // normal: 2x + 8
+    if (pulse <= threshold) continue;
     ++stats_.preambles;
 
     ++stats_.frames;

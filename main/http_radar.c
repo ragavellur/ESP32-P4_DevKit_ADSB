@@ -177,14 +177,16 @@ static esp_err_t h_status_json(httpd_req_t *req)
 #define SETTINGS_KEY_DC_FILTER "dc_filter"
 #define SETTINGS_KEY_ADAPTIVE_GAIN "adaptive_gain"
 #define SETTINGS_KEY_GAIN_MODE "gain_mode"
+#define SETTINGS_KEY_AGGRESSIVE "aggressive"
 
 #define DEFAULT_GAIN_TENTH_DB 496
 #define DEFAULT_DC_FILTER false
 #define DEFAULT_ADAPTIVE_GAIN false
 #define DEFAULT_GAIN_MODE 0  /* 0=manual, 1=adaptive */
+#define DEFAULT_AGGRESSIVE false
 
 static void settings_json_response(char *buf, size_t cap,
-                                   int gain, bool dc_filter, bool adaptive_gain, int gain_mode)
+                                   int gain, bool dc_filter, bool adaptive_gain, int gain_mode, bool aggressive)
 {
     const char *mode_str = (gain_mode == 1) ? "adaptive" : "manual";
     snprintf(buf, cap,
@@ -193,21 +195,25 @@ static void settings_json_response(char *buf, size_t cap,
         "\"dc_filter\":%s,"
         "\"adaptive_gain\":%s,"
         "\"gain_mode\":\"%s\","
+        "\"aggressive\":%s,"
         "\"defaults\":{"
             "\"gain\":%d,"
             "\"dc_filter\":%s,"
             "\"adaptive_gain\":%s,"
-            "\"gain_mode\":\"%s\""
+            "\"gain_mode\":\"%s\","
+            "\"aggressive\":%s"
         "}"
         "}",
         gain,
         dc_filter ? "true" : "false",
         adaptive_gain ? "true" : "false",
         mode_str,
+        aggressive ? "true" : "false",
         DEFAULT_GAIN_TENTH_DB,
         DEFAULT_DC_FILTER ? "true" : "false",
         DEFAULT_ADAPTIVE_GAIN ? "true" : "false",
-        (DEFAULT_GAIN_MODE == 1) ? "adaptive" : "manual");
+        (DEFAULT_GAIN_MODE == 1) ? "adaptive" : "manual",
+        DEFAULT_AGGRESSIVE ? "true" : "false");
 }
 
 static esp_err_t h_settings_get(httpd_req_t *req)
@@ -218,17 +224,19 @@ static esp_err_t h_settings_get(httpd_req_t *req)
     uint8_t dc_filter = DEFAULT_DC_FILTER;
     uint8_t adaptive_gain = DEFAULT_ADAPTIVE_GAIN;
     uint8_t gain_mode = DEFAULT_GAIN_MODE;
+    uint8_t aggressive = DEFAULT_AGGRESSIVE;
 
     if (nvs_open(SETTINGS_NS, NVS_READONLY, &h) == ESP_OK) {
         nvs_get_i32(h, SETTINGS_KEY_GAIN, &gain);
         nvs_get_u8(h, SETTINGS_KEY_DC_FILTER, &dc_filter);
         nvs_get_u8(h, SETTINGS_KEY_ADAPTIVE_GAIN, &adaptive_gain);
         nvs_get_u8(h, SETTINGS_KEY_GAIN_MODE, &gain_mode);
+        nvs_get_u8(h, SETTINGS_KEY_AGGRESSIVE, &aggressive);
         nvs_close(h);
     }
 
     char buf[512];
-    settings_json_response(buf, sizeof(buf), gain, dc_filter != 0, adaptive_gain != 0, gain_mode);
+    settings_json_response(buf, sizeof(buf), gain, dc_filter != 0, adaptive_gain != 0, gain_mode, aggressive != 0);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -264,6 +272,7 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     int dc_filter = -1;
     int adaptive_gain = -1;
     int gain_mode = -1;
+    int aggressive = -1;
 
     char *p = strstr(buf, "\"gain\"");
     if (p) {
@@ -292,6 +301,14 @@ static esp_err_t h_settings_post(httpd_req_t *req)
         if (p) {
             if (strstr(p, "adaptive")) gain_mode = 1;
             else if (strstr(p, "manual")) gain_mode = 0;
+        }
+    }
+    p = strstr(buf, "\"aggressive\"");
+    if (p) {
+        p = strchr(p, ':');
+        if (p) {
+            if (strstr(p, "true")) aggressive = 1;
+            else if (strstr(p, "false")) aggressive = 0;
         }
     }
     free(buf);
@@ -325,6 +342,9 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     if (gain_mode != -1) {
         nvs_set_u8(h, SETTINGS_KEY_GAIN_MODE, gain_mode);
     }
+    if (aggressive != -1) {
+        nvs_set_u8(h, SETTINGS_KEY_AGGRESSIVE, aggressive);
+    }
     nvs_commit(h);
     nvs_close(h);
 
@@ -338,7 +358,8 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     bool cur_dc = (dc_filter != -1) ? dc_filter : DEFAULT_DC_FILTER;
     bool cur_adaptive = (adaptive_gain != -1) ? adaptive_gain : DEFAULT_ADAPTIVE_GAIN;
     int cur_mode = (gain_mode != -1) ? gain_mode : DEFAULT_GAIN_MODE;
-    settings_json_response(resp, sizeof(resp), cur_gain, cur_dc, cur_adaptive, cur_mode);
+    bool cur_aggressive = (aggressive != -1) ? aggressive : DEFAULT_AGGRESSIVE;
+    settings_json_response(resp, sizeof(resp), cur_gain, cur_dc, cur_adaptive, cur_mode, cur_aggressive);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -357,17 +378,20 @@ static esp_err_t h_settings_reset(httpd_req_t *req)
     nvs_erase_key(h, SETTINGS_KEY_DC_FILTER);
     nvs_erase_key(h, SETTINGS_KEY_ADAPTIVE_GAIN);
     nvs_erase_key(h, SETTINGS_KEY_GAIN_MODE);
+    nvs_erase_key(h, SETTINGS_KEY_AGGRESSIVE);
     nvs_commit(h);
     nvs_close(h);
 
     /* Apply defaults immediately */
     adsb_decoder_bridge_set_dc_filter(DEFAULT_DC_FILTER);
+    adsb_decoder_bridge_set_aggressive(DEFAULT_AGGRESSIVE);
     /* Gain will be picked up by status task on next cycle */
 
     char resp[512];
     settings_json_response(resp, sizeof(resp),
                            DEFAULT_GAIN_TENTH_DB, DEFAULT_DC_FILTER,
-                           DEFAULT_ADAPTIVE_GAIN, DEFAULT_GAIN_MODE);
+                           DEFAULT_ADAPTIVE_GAIN, DEFAULT_GAIN_MODE,
+                           DEFAULT_AGGRESSIVE);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

@@ -48,6 +48,7 @@ class Decoder {
     const Stats& stats() const { return stats_; }
     static bool self_check();
     void set_dc_filter(bool enable);
+    void set_aggressive(bool enable);
 
   private:
     static constexpr size_t kMagnitudeCapacity = 16640;
@@ -58,6 +59,7 @@ class Decoder {
     int32_t dc_i_accum_ = 0;
     int32_t dc_q_accum_ = 0;
     uint32_t dc_sample_count_ = 0;
+    bool aggressive_ = false;
 };
 
 }  // namespace adsb_radar::adsb_rx
