@@ -50,6 +50,7 @@ class Decoder {
     void set_dc_filter(bool enable);
     void set_aggressive(bool enable);
     void set_crc_fix(bool enable);
+    void set_sample_rate(uint32_t sample_rate_sps);
 
   private:
     static constexpr size_t kMagnitudeCapacity = 16640;
@@ -62,6 +63,7 @@ class Decoder {
     uint32_t dc_sample_count_ = 0;
     bool aggressive_ = false;
     bool crc_fix_enabled_ = false;
+    uint32_t sample_rate_sps_ = 2048000;
 };
 
 }  // namespace adsb_radar::adsb_rx

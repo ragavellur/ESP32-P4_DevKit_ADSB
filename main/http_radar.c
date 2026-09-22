@@ -1,3 +1,4 @@
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -179,6 +180,7 @@ static esp_err_t h_status_json(httpd_req_t *req)
 #define SETTINGS_KEY_GAIN_MODE "gain_mode"
 #define SETTINGS_KEY_AGGRESSIVE "aggressive"
 #define SETTINGS_KEY_CRC_FIX "crc_fix"
+#define SETTINGS_KEY_SAMPLE_RATE "sample_rate_sps"
 
 #define DEFAULT_GAIN_TENTH_DB 496
 #define DEFAULT_DC_FILTER false
@@ -186,9 +188,10 @@ static esp_err_t h_status_json(httpd_req_t *req)
 #define DEFAULT_GAIN_MODE 0  /* 0=manual, 1=adaptive */
 #define DEFAULT_AGGRESSIVE false
 #define DEFAULT_CRC_FIX false
+#define DEFAULT_SAMPLE_RATE_SPS 2048000u
 
 static void settings_json_response(char *buf, size_t cap,
-                                   int gain, bool dc_filter, bool adaptive_gain, int gain_mode, bool aggressive, bool crc_fix)
+                                   int gain, bool dc_filter, bool adaptive_gain, int gain_mode, bool aggressive, bool crc_fix, uint32_t sample_rate_sps)
 {
     const char *mode_str = (gain_mode == 1) ? "adaptive" : "manual";
     snprintf(buf, cap,
@@ -199,13 +202,15 @@ static void settings_json_response(char *buf, size_t cap,
         "\"gain_mode\":\"%s\","
         "\"aggressive\":%s,"
         "\"crc_fix\":%s,"
+        "\"sample_rate_sps\":%" PRIu32 ","
         "\"defaults\":{"
             "\"gain\":%d,"
             "\"dc_filter\":%s,"
             "\"adaptive_gain\":%s,"
             "\"gain_mode\":\"%s\","
             "\"aggressive\":%s,"
-            "\"crc_fix\":%s"
+            "\"crc_fix\":%s,"
+            "\"sample_rate_sps\":%" PRIu32
         "}"
         "}",
         gain,
@@ -214,12 +219,14 @@ static void settings_json_response(char *buf, size_t cap,
         mode_str,
         aggressive ? "true" : "false",
         crc_fix ? "true" : "false",
+        (unsigned long)sample_rate_sps,
         DEFAULT_GAIN_TENTH_DB,
         DEFAULT_DC_FILTER ? "true" : "false",
         DEFAULT_ADAPTIVE_GAIN ? "true" : "false",
         (DEFAULT_GAIN_MODE == 1) ? "adaptive" : "manual",
         DEFAULT_AGGRESSIVE ? "true" : "false",
-        DEFAULT_CRC_FIX ? "true" : "false");
+        DEFAULT_CRC_FIX ? "true" : "false",
+        (unsigned long)DEFAULT_SAMPLE_RATE_SPS);
 }
 
 static esp_err_t h_settings_get(httpd_req_t *req)
@@ -232,6 +239,7 @@ static esp_err_t h_settings_get(httpd_req_t *req)
     uint8_t gain_mode = DEFAULT_GAIN_MODE;
     uint8_t aggressive = DEFAULT_AGGRESSIVE;
     uint8_t crc_fix = DEFAULT_CRC_FIX;
+    uint32_t sample_rate_sps = DEFAULT_SAMPLE_RATE_SPS;
 
     if (nvs_open(SETTINGS_NS, NVS_READONLY, &h) == ESP_OK) {
         nvs_get_i32(h, SETTINGS_KEY_GAIN, &gain);
@@ -240,11 +248,12 @@ static esp_err_t h_settings_get(httpd_req_t *req)
         nvs_get_u8(h, SETTINGS_KEY_GAIN_MODE, &gain_mode);
         nvs_get_u8(h, SETTINGS_KEY_AGGRESSIVE, &aggressive);
         nvs_get_u8(h, SETTINGS_KEY_CRC_FIX, &crc_fix);
+        nvs_get_u32(h, SETTINGS_KEY_SAMPLE_RATE, &sample_rate_sps);
         nvs_close(h);
     }
 
     char buf[512];
-    settings_json_response(buf, sizeof(buf), gain, dc_filter != 0, adaptive_gain != 0, gain_mode, aggressive != 0, crc_fix != 0);
+    settings_json_response(buf, sizeof(buf), gain, dc_filter != 0, adaptive_gain != 0, gain_mode, aggressive != 0, crc_fix != 0, sample_rate_sps);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -282,6 +291,7 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     int gain_mode = -1;
     int aggressive = -1;
     int crc_fix = -1;
+    int sample_rate_sps = -1;
 
     char *p = strstr(buf, "\"gain\"");
     if (p) {
@@ -328,6 +338,11 @@ static esp_err_t h_settings_post(httpd_req_t *req)
             else if (strstr(p, "false")) crc_fix = 0;
         }
     }
+    p = strstr(buf, "\"sample_rate_sps\"");
+    if (p) {
+        p = strchr(p, ':');
+        if (p) sample_rate_sps = atoi(p + 1);
+    }
     free(buf);
 
     /* Validate */
@@ -337,6 +352,10 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     }
     if (gain_mode != -1 && (gain_mode < 0 || gain_mode > 1)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "gain_mode must be 0 (manual) or 1 (adaptive)");
+        return ESP_FAIL;
+    }
+    if (sample_rate_sps != -1 && (sample_rate_sps != 2048000 && sample_rate_sps != 2400000)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "sample_rate_sps must be 2048000 or 2400000");
         return ESP_FAIL;
     }
 
@@ -365,6 +384,9 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     if (crc_fix != -1) {
         nvs_set_u8(h, SETTINGS_KEY_CRC_FIX, crc_fix);
     }
+    if (sample_rate_sps != -1) {
+        nvs_set_u32(h, SETTINGS_KEY_SAMPLE_RATE, (uint32_t)sample_rate_sps);
+    }
     nvs_commit(h);
     nvs_close(h);
 
@@ -380,7 +402,8 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     int cur_mode = (gain_mode != -1) ? gain_mode : DEFAULT_GAIN_MODE;
     bool cur_aggressive = (aggressive != -1) ? aggressive : DEFAULT_AGGRESSIVE;
     bool cur_crc_fix = (crc_fix != -1) ? crc_fix : DEFAULT_CRC_FIX;
-    settings_json_response(resp, sizeof(resp), cur_gain, cur_dc, cur_adaptive, cur_mode, cur_aggressive, cur_crc_fix);
+    uint32_t cur_sample_rate_sps = (sample_rate_sps != -1) ? (uint32_t)sample_rate_sps : DEFAULT_SAMPLE_RATE_SPS;
+    settings_json_response(resp, sizeof(resp), cur_gain, cur_dc, cur_adaptive, cur_mode, cur_aggressive, cur_crc_fix, cur_sample_rate_sps);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -401,6 +424,7 @@ static esp_err_t h_settings_reset(httpd_req_t *req)
     nvs_erase_key(h, SETTINGS_KEY_GAIN_MODE);
     nvs_erase_key(h, SETTINGS_KEY_AGGRESSIVE);
     nvs_erase_key(h, SETTINGS_KEY_CRC_FIX);
+    nvs_erase_key(h, SETTINGS_KEY_SAMPLE_RATE);
     nvs_commit(h);
     nvs_close(h);
 
@@ -408,14 +432,13 @@ static esp_err_t h_settings_reset(httpd_req_t *req)
     adsb_decoder_bridge_set_dc_filter(DEFAULT_DC_FILTER);
     adsb_decoder_bridge_set_aggressive(DEFAULT_AGGRESSIVE);
     adsb_decoder_bridge_set_crc_fix(DEFAULT_CRC_FIX);
-    adsb_decoder_bridge_set_aggressive(DEFAULT_AGGRESSIVE);
     /* Gain will be picked up by status task on next cycle */
 
     char resp[512];
     settings_json_response(resp, sizeof(resp),
                            DEFAULT_GAIN_TENTH_DB, DEFAULT_DC_FILTER,
                            DEFAULT_ADAPTIVE_GAIN, DEFAULT_GAIN_MODE,
-                           DEFAULT_AGGRESSIVE, DEFAULT_CRC_FIX);
+                           DEFAULT_AGGRESSIVE, DEFAULT_CRC_FIX, DEFAULT_SAMPLE_RATE_SPS);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

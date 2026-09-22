@@ -193,6 +193,10 @@ void Decoder::set_crc_fix(bool enable) {
   crc_fix_enabled_ = enable;
 }
 
+void Decoder::set_sample_rate(uint32_t sample_rate_sps) {
+  sample_rate_sps_ = sample_rate_sps;
+}
+
 void Decoder::process_cu8(const uint8_t* data, size_t bytes, FrameCallback callback,
                           void* context) {
   if (!data) return;
@@ -216,20 +220,51 @@ void Decoder::process_cu8(const uint8_t* data, size_t bytes, FrameCallback callb
       magnitudes_[count++] = magnitude;
     }
   }
-constexpr size_t kFrameSamples = 246;
-  // Bit interpolation for the last data bit reads one sample past the
-  // kFrameSamples preamble window (see interpolate()), so require that
-  // extra sample to be part of this call's freshly-filled data.
+constexpr size_t kFrameSamples_2048 = 246;
+  constexpr size_t kFrameSamples_2400 = 288;
+  size_t kFrameSamples;
+  size_t bit_spacing;
+  size_t half_bit_spacing;
+  size_t first_center_min;
+  size_t first_center_max;
+  size_t pulse_idx[4];
+  size_t quiet_start;
+  size_t quiet_len;
+
+  if (sample_rate_sps_ == 2400000) {
+    kFrameSamples = kFrameSamples_2400;
+    bit_spacing = 1200;
+    half_bit_spacing = 600;
+    first_center_min = 17000;
+    first_center_max = 21000;
+    size_t pidx[4] = {1, 3, 9, 11};
+    for (int i = 0; i < 4; ++i) pulse_idx[i] = pidx[i];
+    quiet_start = 19; quiet_len = 5;
+  } else {
+    kFrameSamples = kFrameSamples_2048;
+    bit_spacing = 2048;
+    half_bit_spacing = 1024;
+    first_center_min = 15946;
+    first_center_max = 16846;
+    size_t pidx[4] = {0, 2, 7, 9};
+    for (int i = 0; i < 4; ++i) pulse_idx[i] = pidx[i];
+    quiet_start = 11; quiet_len = 5;
+  }
+
   for (size_t pos = 0; pos + kFrameSamples + 1 <= count; ++pos) {
     const uint16_t* sample = magnitudes_ + pos;
-    if (sample[0] <= sample[1] || sample[2] <= sample[1] || sample[2] <= sample[3] ||
-        sample[7] <= sample[6] || sample[7] <= sample[8] || sample[9] <= sample[8] ||
-        sample[9] <= sample[10])
+    if (sample[pulse_idx[0]] <= sample[pulse_idx[0]+1] ||
+        sample[pulse_idx[1]] <= sample[pulse_idx[1]-1] || sample[pulse_idx[1]] <= sample[pulse_idx[1]+1] ||
+        sample[pulse_idx[2]] <= sample[pulse_idx[2]-1] || sample[pulse_idx[2]] <= sample[pulse_idx[2]+1] ||
+        sample[pulse_idx[3]] <= sample[pulse_idx[3]-1] || sample[pulse_idx[3]] <= sample[pulse_idx[3]+1])
       continue;
     const uint16_t pulse = static_cast<uint16_t>(
-        (sample[0] + sample[2] + sample[7] + sample[9]) / 4u);
+        (sample[pulse_idx[0]] + sample[pulse_idx[1]] +
+         sample[pulse_idx[2]] + sample[pulse_idx[3]]) / 4u);
     const uint16_t quiet = static_cast<uint16_t>(
-        (sample[11] + sample[12] + sample[13] + sample[14] + sample[15]) / 5u);
+        (sample[quiet_start] + sample[quiet_start+1] +
+         sample[quiet_start+2] + sample[quiet_start+3] +
+         sample[quiet_start+4]) / 5u);
     const uint32_t threshold = aggressive_ ? 
         (static_cast<uint32_t>(quiet) * 3u / 2u + 4u) :  // aggressive: 1.5x + 4
         (static_cast<uint32_t>(quiet) * 2u + 8u);       // normal: 2x + 8
@@ -241,14 +276,11 @@ constexpr size_t kFrameSamples = 246;
     bool valid = false;
     bool saw_df17 = false;
     uint8_t valid_bits = 0;
-    // Preamble peak alignment constrains the data-center phase to this narrow
-    // range. Interpolation avoids the five hard-decision errors measured in a
-    // live 2.048 MS/s frame without weakening CRC acceptance.
-    for (size_t first_center = 15946; first_center <= 16846; first_center += 100) {
+    for (size_t first_center = first_center_min; first_center <= first_center_max; first_center += 100) {
       uint8_t frame[14]{};
       for (int bit = 0; bit < 112; ++bit) {
-        const size_t center = first_center + static_cast<size_t>(bit) * 2048u;
-        if (interpolate(sample, center) > interpolate(sample, center + 1024u))
+        const size_t center = first_center + static_cast<size_t>(bit) * bit_spacing;
+        if (interpolate(sample, center) > interpolate(sample, center + half_bit_spacing))
           frame[bit / 8] |= static_cast<uint8_t>(0x80u >> (bit % 8));
       }
       const uint8_t df = frame[0] >> 3;
@@ -259,7 +291,6 @@ constexpr size_t kFrameSamples = 246;
         valid_bits = frame_bits;
         break;
       }
-      // Try single-bit CRC fix if enabled
       if (crc_fix_enabled_) {
         uint8_t frame_copy[14];
         std::memcpy(frame_copy, frame, frame_bits / 8);
@@ -276,8 +307,6 @@ constexpr size_t kFrameSamples = 246;
     if (callback) callback(decoded, context);
     pos += (valid_bits == 56 ? 131 : kFrameSamples) - 1;
   }
-  // Retain kFrameSamples samples (not kFrameSamples - 1) so the extra
-  // lookahead sample the interpolator needs is available on the next call.
   overlap_ = std::min(count, kFrameSamples);
   std::memmove(magnitudes_, magnitudes_ + count - overlap_, overlap_ * sizeof(uint16_t));
 }

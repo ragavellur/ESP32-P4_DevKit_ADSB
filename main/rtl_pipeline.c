@@ -34,6 +34,7 @@
 #define SETTINGS_KEY_GAIN_MODE "gain_mode"
 #define SETTINGS_KEY_AGGRESSIVE "aggressive"
 #define SETTINGS_KEY_CRC_FIX "crc_fix"
+#define SETTINGS_KEY_SAMPLE_RATE "sample_rate_sps"
 
 /* Default settings (match current hardcoded values) */
 #define DEFAULT_GAIN_TENTH_DB 496
@@ -42,6 +43,7 @@
 #define DEFAULT_GAIN_MODE 0  /* 0=manual, 1=adaptive */
 #define DEFAULT_AGGRESSIVE false
 #define DEFAULT_CRC_FIX false
+#define DEFAULT_SAMPLE_RATE_SPS 2048000u
 
 /* Adaptive gain parameters */
 #define ADAPTIVE_GAIN_HYSTERESIS_S 3
@@ -102,6 +104,7 @@ typedef struct {
     gain_mode_t gain_mode;
     bool aggressive;
     bool crc_fix;
+    uint32_t sample_rate_sps;
 } radar_settings_t;
 
 static radar_settings_t s_settings;
@@ -191,6 +194,10 @@ static void settings_load(void)
     if (nvs_get_i32(h, SETTINGS_KEY_GAIN, &val32) == ESP_OK) {
         s_settings.gain_tenth_db = val32;
     }
+    uint32_t val32_u;
+    if (nvs_get_u32(h, SETTINGS_KEY_SAMPLE_RATE, &val32_u) == ESP_OK) {
+        s_settings.sample_rate_sps = val32_u;
+    }
     uint8_t val8;
     if (nvs_get_u8(h, SETTINGS_KEY_DC_FILTER, &val8) == ESP_OK) {
         s_settings.dc_filter = val8 != 0;
@@ -216,6 +223,7 @@ defaults:
     s_settings.gain_mode = DEFAULT_GAIN_MODE;
     s_settings.aggressive = DEFAULT_AGGRESSIVE;
     s_settings.crc_fix = DEFAULT_CRC_FIX;
+    s_settings.sample_rate_sps = DEFAULT_SAMPLE_RATE_SPS;
 }
 
 static void settings_save(void)
@@ -225,6 +233,7 @@ static void settings_save(void)
         return;
     }
     nvs_set_i32(h, SETTINGS_KEY_GAIN, s_settings.gain_tenth_db);
+    nvs_set_u32(h, SETTINGS_KEY_SAMPLE_RATE, s_settings.sample_rate_sps);
     nvs_set_u8(h, SETTINGS_KEY_DC_FILTER, s_settings.dc_filter ? 1 : 0);
     nvs_set_u8(h, SETTINGS_KEY_ADAPTIVE_GAIN, s_settings.adaptive_gain ? 1 : 0);
     nvs_set_u8(h, SETTINGS_KEY_GAIN_MODE, (uint8_t)s_settings.gain_mode);
@@ -250,6 +259,7 @@ static void settings_apply_initial(void)
     }
     ESP_LOGI(PIPELINE_TAG, "Aggressive mode: %s", s_settings.aggressive ? "ON" : "OFF");
     ESP_LOGI(PIPELINE_TAG, "CRC fix: %s", s_settings.crc_fix ? "ON" : "OFF");
+    ESP_LOGI(PIPELINE_TAG, "Sample rate: %u SPS", s_settings.sample_rate_sps);
     (void)esp_rtl_sdr_set_tuner_gain_mode(s_ctx.handle, ESP_RTL_SDR_GAIN_MODE_MANUAL);
     (void)esp_rtl_sdr_set_tuner_gain(s_ctx.handle, s_settings.gain_tenth_db);
     adsb_decoder_bridge_set_crc_fix(s_settings.crc_fix);
@@ -618,7 +628,7 @@ static void rtl_driver_task(void *arg)
             .struct_size = sizeof(esp_rtl_sdr_stream_config_t),
             .preset = ESP_RTL_SDR_PRESET_CUSTOM_HZ,
             .frequency_hz = ADSB_FREQ_HZ,
-            .sample_rate_sps = ADSB_RATE_SPS,
+            .sample_rate_sps = s_settings.sample_rate_sps,
             .max_bytes = 0,
             .timeout_ms = 0,
         });
@@ -635,7 +645,7 @@ static void rtl_driver_task(void *arg)
         vTaskDelete(NULL);
         return;
     }
-    ESP_LOGI(PIPELINE_TAG, "streaming 1090 MHz @ 2.048 MSPS");
+    ESP_LOGI(PIPELINE_TAG, "streaming 1090 MHz @ %u SPS", s_settings.sample_rate_sps);
 
     /* Apply user settings (gain, DC filter, adaptive gain) */
     settings_apply_initial();
@@ -750,5 +760,16 @@ esp_err_t rtl_pipeline_apply_settings(void)
     /* Apply CRC fix */
     adsb_decoder_bridge_set_crc_fix(s_settings.crc_fix);
     ESP_LOGI(PIPELINE_TAG, "CRC fix: %s", s_settings.crc_fix ? "ON" : "OFF");
+    /* Apply sample rate - requires pipeline restart if changed */
+    static uint32_t last_applied_sample_rate = 0;
+    if (s_settings.sample_rate_sps != last_applied_sample_rate) {
+        ESP_LOGI(PIPELINE_TAG, "Sample rate changed: %u -> %u SPS, restarting pipeline",
+                 last_applied_sample_rate, s_settings.sample_rate_sps);
+        last_applied_sample_rate = s_settings.sample_rate_sps;
+        /* Update decoder sample rate */
+        adsb_decoder_bridge_set_sample_rate(s_settings.sample_rate_sps);
+        /* Signal pipeline restart needed */
+        return ESP_ERR_INVALID_STATE; // Special code to indicate restart needed
+    }
     return ESP_OK;
 }

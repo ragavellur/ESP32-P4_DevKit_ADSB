@@ -166,3 +166,8 @@ void adsb_decoder_bridge_set_crc_fix(bool enable)
 {
     s_dec.set_crc_fix(enable);
 }
+
+void adsb_decoder_bridge_set_sample_rate(uint32_t sample_rate_sps)
+{
+    s_dec.set_sample_rate(sample_rate_sps);
+}

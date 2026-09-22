@@ -79,6 +79,8 @@ void adsb_decoder_bridge_set_aggressive(bool enable);
 
 void adsb_decoder_bridge_set_crc_fix(bool enable);
 
+void adsb_decoder_bridge_set_sample_rate(uint32_t sample_rate_sps);
+
 #ifdef __cplusplus
 }
 #endif
