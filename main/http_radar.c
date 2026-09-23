@@ -321,6 +321,8 @@ static esp_err_t h_settings_post(httpd_req_t *req)
         if (p) {
             if (strstr(p, "adaptive")) gain_mode = 1;
             else if (strstr(p, "manual")) gain_mode = 0;
+            else if (strstr(p, "1")) gain_mode = 1;
+            else if (strstr(p, "0")) gain_mode = 0;
         }
     }
     p = strstr(buf, "\"aggressive\"");
