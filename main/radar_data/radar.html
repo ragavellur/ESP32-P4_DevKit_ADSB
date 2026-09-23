@@ -106,6 +106,56 @@
                 <span class="slider"></span>
             </label>
         </div>
+
+        <!-- Settings Panel -->
+        <div class="control-row" style="border-top: 1px dashed #004400; margin-top: 10px; padding-top: 10px;">
+            <span style="display: flex; justify-content: space-between; width: 100%; cursor: pointer;" onclick="toggleSettings()">
+                <strong>⚙ Settings</strong>
+                <span id="settingsToggleBtn">[+]</span>
+            </span>
+        </div>
+        <div id="settings-content" style="display: none; padding-top: 10px;">
+            <div class="control-row"><span>Gain (tenth dB):</span> <input type="number" id="setGain" value="496" min="0" max="496"></div>
+            <div class="control-row"><span>DC Filter:</span>
+                <label class="switch">
+                    <input type="checkbox" id="setDcFilter">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="control-row"><span>Adaptive Gain:</span>
+                <label class="switch">
+                    <input type="checkbox" id="setAdaptiveGain">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="control-row"><span>Gain Mode:</span>
+                <select id="setGainMode">
+                    <option value="0">Manual</option>
+                    <option value="1">Adaptive</option>
+                </select>
+            </div>
+            <div class="control-row"><span>Aggressive:</span>
+                <label class="switch">
+                    <input type="checkbox" id="setAggressive">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="control-row"><span>CRC Fix:</span>
+                <label class="switch">
+                    <input type="checkbox" id="setCrcFix">
+                    <span class="slider"></span>
+                </label>
+            </div>
+            <div class="control-row"><span>Sample Rate (SPS):</span>
+                <select id="setSampleRate">
+                    <option value="2048000">2048000 (2.048 MSPS)</option>
+                    <option value="2400000">2400000 (2.4 MSPS)</option>
+                </select>
+            </div>
+            <div class="control-row" style="margin-top: 10px;">
+                <button id="btnResetSettings" style="width: 100%; background: #003300; border: 1px solid #00ff41; color: #00ff41; font-family: 'Courier New', monospace; padding: 8px; cursor: pointer;">🔄 Reset to Defaults</button>
+            </div>
+        </div>
     </div>
     <div id="status">Waiting for sweep...</div>
     <div id="user-location">User GPS: Fetching...</div>
@@ -135,6 +185,9 @@
         uiContent.style.display = menuOpen ? 'block' : 'none';
         toggleBtn.innerText = menuOpen ? '[-]' : '[+]';
     }
+
+    // Make toggleMenu globally accessible for onclick handler
+    window.toggleMenu = toggleMenu;
 
     window.closeTarget = function() {
         lockedTargetHex = null;
@@ -513,6 +566,92 @@
     loadReceiver();
     fetchAircraftData();
     render();
-</script>
-</body>
-</html>
+
+    // --- SETTINGS PANEL ---
+    let settingsOpen = false;
+    const settingsContent = document.getElementById('settings-content');
+    const settingsToggleBtn = document.getElementById('settingsToggleBtn');
+    const settingsForm = {
+        gain: document.getElementById('setGain'),
+        dcFilter: document.getElementById('setDcFilter'),
+        adaptiveGain: document.getElementById('setAdaptiveGain'),
+        gainMode: document.getElementById('setGainMode'),
+        aggressive: document.getElementById('setAggressive'),
+        crcFix: document.getElementById('setCrcFix'),
+        sampleRate: document.getElementById('setSampleRate'),
+        btnReset: document.getElementById('btnResetSettings')
+    };
+
+    function toggleSettings() {
+        settingsOpen = !settingsOpen;
+        settingsContent.style.display = settingsOpen ? 'block' : 'none';
+        settingsToggleBtn.innerText = settingsOpen ? '[-]' : '[+]';
+        if (settingsOpen) loadSettings();
+    }
+
+    async function loadSettings() {
+        try {
+            const r = await fetch('/api/settings');
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const s = await r.json();
+            if (settingsForm.gain) settingsForm.gain.value = s.gain;
+            if (settingsForm.dcFilter) settingsForm.dcFilter.checked = s.dc_filter;
+            if (settingsForm.adaptiveGain) settingsForm.adaptiveGain.checked = s.adaptive_gain;
+            if (settingsForm.gainMode) settingsForm.gainMode.value = s.gain_mode;
+            if (settingsForm.aggressive) settingsForm.aggressive.checked = s.aggressive;
+            if (settingsForm.crcFix) settingsForm.crcFix.checked = s.crc_fix;
+            if (settingsForm.sampleRate) settingsForm.sampleRate.value = s.sample_rate_sps;
+        } catch (err) {
+            console.error('Failed to load settings:', err);
+        }
+    }
+
+    async function saveSettings() {
+        const body = {
+            gain: parseInt(settingsForm.gain.value),
+            dc_filter: settingsForm.dcFilter.checked,
+            adaptive_gain: settingsForm.adaptiveGain.checked,
+            gain_mode: settingsForm.gainMode.value,
+            aggressive: settingsForm.aggressive.checked,
+            crc_fix: settingsForm.crcFix.checked,
+            sample_rate_sps: parseInt(settingsForm.sampleRate.value)
+        };
+        try {
+            const r = await fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            const s = await r.json();
+            alert('Settings saved!' + (s.sample_rate_sps !== body.sample_rate_sps ? ' Device will restart.' : ''));
+            loadSettings();
+        } catch (err) {
+            alert('Failed to save settings: ' + err.message);
+        }
+    }
+
+    async function resetSettings() {
+        if (!confirm('Reset all settings to defaults?')) return;
+        try {
+            const r = await fetch('/api/settings/reset', { method: 'POST' });
+            if (!r.ok) throw new Error(`HTTP ${r.status}`);
+            alert('Settings reset to defaults');
+            loadSettings();
+        } catch (err) {
+            alert('Failed to reset settings: ' + err.message);
+        }
+    }
+
+    // Event listeners
+    if (settingsForm.gain) settingsForm.gain.addEventListener('change', saveSettings);
+    if (settingsForm.dcFilter) settingsForm.dcFilter.addEventListener('change', saveSettings);
+    if (settingsForm.adaptiveGain) settingsForm.adaptiveGain.addEventListener('change', saveSettings);
+    if (settingsForm.gainMode) settingsForm.gainMode.addEventListener('change', saveSettings);
+    if (settingsForm.aggressive) settingsForm.aggressive.addEventListener('change', saveSettings);
+    if (settingsForm.crcFix) settingsForm.crcFix.addEventListener('change', saveSettings);
+    if (settingsForm.sampleRate) settingsForm.sampleRate.addEventListener('change', saveSettings);
+    if (settingsForm.btnReset) settingsForm.btnReset.addEventListener('click', resetSettings);
+
+    // Initial load if panel is already open
+    if (settingsOpen) loadSettings();

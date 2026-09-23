@@ -1,4 +1,5 @@
 #include <inttypes.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -390,20 +391,47 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     nvs_commit(h);
     nvs_close(h);
 
+    /* Update in-memory settings via pipeline API */
+    int cur_gain;
+    bool cur_adaptive;
+    bool cur_dc, cur_aggressive, cur_crc_fix;
+    gain_mode_t cur_mode;
+    uint32_t cur_sample_rate;
+    extern void rtl_pipeline_get_settings(int*, bool*, bool*, gain_mode_t*, bool*, bool*, uint32_t*);
+    rtl_pipeline_get_settings(&cur_gain, &cur_dc, &cur_adaptive, &cur_mode, &cur_aggressive, &cur_crc_fix, &cur_sample_rate);
+
+    int new_gain = (gain != -1) ? gain : cur_gain;
+    bool new_dc_filter = (dc_filter != -1) ? dc_filter : cur_dc;
+    bool new_adaptive_gain = (adaptive_gain != -1) ? adaptive_gain : cur_adaptive;
+    gain_mode_t new_gain_mode = (gain_mode != -1) ? (gain_mode_t)gain_mode : cur_mode;
+    bool new_aggressive = (aggressive != -1) ? aggressive : cur_aggressive;
+    bool new_crc_fix = (crc_fix != -1) ? crc_fix : cur_crc_fix;
+    uint32_t new_sample_rate_sps = (sample_rate_sps != -1) ? (uint32_t)sample_rate_sps : cur_sample_rate;
+
+    extern void rtl_pipeline_update_settings(int, bool, bool, gain_mode_t, bool, bool, uint32_t);
+    rtl_pipeline_update_settings(new_gain, new_dc_filter, new_adaptive_gain,
+                                  new_gain_mode, new_aggressive, new_crc_fix, new_sample_rate_sps);
+
     /* Apply settings immediately via pipeline API */
     extern esp_err_t rtl_pipeline_apply_settings(void);
-    rtl_pipeline_apply_settings();
+    esp_err_t ret = rtl_pipeline_apply_settings();
+    if (ret == ESP_ERR_INVALID_STATE) {
+        /* Sample rate changed - need to restart pipeline */
+        ESP_LOGI(TAG, "Sample rate changed, restarting pipeline...");
+        extern void rtl_pipeline_restart(void);
+        rtl_pipeline_restart();
+    }
 
     /* Return updated settings */
     char resp[512];
-    int cur_gain = (gain != -1) ? gain : DEFAULT_GAIN_TENTH_DB;
-    bool cur_dc = (dc_filter != -1) ? dc_filter : DEFAULT_DC_FILTER;
-    bool cur_adaptive = (adaptive_gain != -1) ? adaptive_gain : DEFAULT_ADAPTIVE_GAIN;
-    int cur_mode = (gain_mode != -1) ? gain_mode : DEFAULT_GAIN_MODE;
-    bool cur_aggressive = (aggressive != -1) ? aggressive : DEFAULT_AGGRESSIVE;
-    bool cur_crc_fix = (crc_fix != -1) ? crc_fix : DEFAULT_CRC_FIX;
-    uint32_t cur_sample_rate_sps = (sample_rate_sps != -1) ? (uint32_t)sample_rate_sps : DEFAULT_SAMPLE_RATE_SPS;
-    settings_json_response(resp, sizeof(resp), cur_gain, cur_dc, cur_adaptive, cur_mode, cur_aggressive, cur_crc_fix, cur_sample_rate_sps);
+    int resp_gain = (gain != -1) ? gain : DEFAULT_GAIN_TENTH_DB;
+    bool resp_dc_filter = (dc_filter != -1) ? dc_filter : DEFAULT_DC_FILTER;
+    bool resp_adaptive_gain = (adaptive_gain != -1) ? adaptive_gain : DEFAULT_ADAPTIVE_GAIN;
+    int resp_mode = (gain_mode != -1) ? gain_mode : DEFAULT_GAIN_MODE;
+    bool resp_aggressive = (aggressive != -1) ? aggressive : DEFAULT_AGGRESSIVE;
+    bool resp_crc_fix = (crc_fix != -1) ? crc_fix : DEFAULT_CRC_FIX;
+    uint32_t resp_sample_rate_sps = (sample_rate_sps != -1) ? (uint32_t)sample_rate_sps : DEFAULT_SAMPLE_RATE_SPS;
+    settings_json_response(resp, sizeof(resp), resp_gain, resp_dc_filter, resp_adaptive_gain, resp_mode, resp_aggressive, resp_crc_fix, resp_sample_rate_sps);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

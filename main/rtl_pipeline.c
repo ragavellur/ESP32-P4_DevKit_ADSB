@@ -90,12 +90,6 @@ static const r820t2_gain_step_t s_gain_ladder[] = {
 
 #define S_GAIN_LADDER_COUNT (sizeof(s_gain_ladder) / sizeof(s_gain_ladder[0]))
 
-/* Gain mode enum */
-typedef enum {
-    GAIN_MODE_MANUAL = 0,
-    GAIN_MODE_ADAPTIVE = 1,
-} gain_mode_t;
-
 /* Persistent settings */
 typedef struct {
     int gain_tenth_db;
@@ -772,4 +766,65 @@ esp_err_t rtl_pipeline_apply_settings(void)
         return ESP_ERR_INVALID_STATE; // Special code to indicate restart needed
     }
     return ESP_OK;
+}
+
+/* Update in-memory settings from web API.
+ * Call this before rtl_pipeline_apply_settings() when settings changed via web API. */
+void rtl_pipeline_update_settings(int gain_tenth_db, bool dc_filter, bool adaptive_gain,
+                                   gain_mode_t gain_mode, bool aggressive, bool crc_fix,
+                                   uint32_t sample_rate_sps)
+{
+    s_settings.gain_tenth_db = gain_tenth_db;
+    s_settings.dc_filter = dc_filter;
+    s_settings.adaptive_gain = adaptive_gain;
+    s_settings.gain_mode = gain_mode;
+    s_settings.aggressive = aggressive;
+    s_settings.crc_fix = crc_fix;
+    s_settings.sample_rate_sps = sample_rate_sps;
+}
+
+/* Get current settings snapshot. */
+void rtl_pipeline_get_settings(int *gain_tenth_db, _Bool *dc_filter, _Bool *adaptive_gain,
+                                gain_mode_t *gain_mode, _Bool *aggressive, _Bool *crc_fix,
+                                uint32_t *sample_rate_sps)
+{
+    *gain_tenth_db = s_settings.gain_tenth_db;
+    *dc_filter = s_settings.dc_filter;
+    *adaptive_gain = s_settings.adaptive_gain;
+    *gain_mode = s_settings.gain_mode;
+    *aggressive = s_settings.aggressive;
+    *crc_fix = s_settings.crc_fix;
+    *sample_rate_sps = s_settings.sample_rate_sps;
+}
+
+/* Restart the pipeline with new settings (e.g. after sample rate change).
+ * Stops streaming, reconfigures driver, restarts streaming. */
+void rtl_pipeline_restart(void)
+{
+    if (!s_ctx.handle) {
+        return;
+    }
+
+    /* Stop current streaming */
+    (void)esp_rtl_sdr_stop(s_ctx.handle, 500);
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    /* Restart with new sample rate */
+    esp_rtl_sdr_stream_config_t stream_cfg = {
+        .struct_size = sizeof(esp_rtl_sdr_stream_config_t),
+        .preset = ESP_RTL_SDR_PRESET_CUSTOM_HZ,
+        .frequency_hz = ADSB_FREQ_HZ,
+        .sample_rate_sps = s_settings.sample_rate_sps,
+        .max_bytes = 0,
+        .timeout_ms = 0,
+    };
+
+    esp_err_t ret = esp_rtl_sdr_start(s_ctx.handle, &stream_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(PIPELINE_TAG, "restart start failed: %s", esp_err_to_name(ret));
+    } else {
+        ESP_LOGI(PIPELINE_TAG, "restarted at %u SPS", s_settings.sample_rate_sps);
+        /* Re-apply other settings */
+        settings_apply_initial();
+    }
 }

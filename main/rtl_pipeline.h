@@ -35,6 +35,11 @@ typedef enum {
     RTL_PIPELINE_DEFUNCT,       /**< fatal error; manual reset required */
 } rtl_pipeline_phase_t;
 
+typedef enum {
+    GAIN_MODE_MANUAL = 0,
+    GAIN_MODE_ADAPTIVE = 1,
+} gain_mode_t;
+
 typedef struct {
     rtl_pipeline_phase_t phase;      /**< coarse state */
     bool device_present;             /**< accepted profile currently attached */
@@ -63,6 +68,21 @@ uint32_t rtl_pipeline_fill_aircraft(adsb_aircraft_t *out, uint32_t cap);
 /* Apply current settings (gain, gain_mode, dc_filter) to driver/decoder.
  * Called from web API after NVS update for immediate effect. */
 esp_err_t rtl_pipeline_apply_settings(void);
+
+/* Restart the pipeline with new settings (e.g. after sample rate change).
+ * Stops streaming, reconfigures driver, restarts streaming. */
+void rtl_pipeline_restart(void);
+
+/* Update in-memory settings from web API.
+ * Call this before rtl_pipeline_apply_settings() when settings changed via web API. */
+void rtl_pipeline_update_settings(int gain_tenth_db, bool dc_filter, bool adaptive_gain,
+                                   gain_mode_t gain_mode, bool aggressive, bool crc_fix,
+                                   uint32_t sample_rate_sps);
+
+/* Get current settings snapshot. */
+void rtl_pipeline_get_settings(int *gain_tenth_db, _Bool *dc_filter, _Bool *adaptive_gain,
+                                gain_mode_t *gain_mode, _Bool *aggressive, _Bool *crc_fix,
+                                uint32_t *sample_rate_sps);
 
 #ifdef __cplusplus
 }
