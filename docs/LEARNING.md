@@ -77,6 +77,37 @@ Each entry: symptom → root cause → fix → the rule to follow forever.
 
 ---
 
+## L11. Dropdown value mismatch — API returns strings but options have numeric values
+
+- **Symptom:** Gain Mode dropdown appears blank on load and after save, despite having valid options (`0`=Manual, `1`=Adaptive). Other dropdowns (Sample Rate) work correctly.
+- **Root cause:** `/api/settings` returns `gain_mode: "manual"` or `"adaptive"` (strings), but the dropdown `<option>` values are `"0"` and `"1"`. Setting `select.value = "manual"` finds no matching `<option value="manual">`, so browser shows blank.
+- **Fix:** In `loadSettings()`, map both numeric and string values to dropdown values:
+  ```javascript
+  const gm = s.gain_mode;
+  if (gm === 0 || gm === "0" || gm === "manual") settingsForm.gainMode.value = "0";
+  else if (gm === 1 || gm === "1" || gm === "adaptive") settingsForm.gainMode.value = "1";
+  else settingsForm.gainMode.value = "0";
+  ```
+  In `saveSettings()`, send numeric values to backend:
+  ```javascript
+  gain_mode: parseInt(settingsForm.gainMode.value, 10)
+  ```
+- **Rule:** Dropdown option `value` attributes must exactly match the API response format. When API returns different formats (string vs numeric), normalize in the client before setting `select.value`.
+
+## L12. Settings auto-save on change causes UX friction
+
+- **Symptom:** Every change in settings panel immediately triggered a save, causing device restarts on sample rate change and spurious network traffic.
+- **Fix:** Remove auto-save on `change` events. Use explicit "Save Settings" button. Only sample rate change requires device restart (handled by firmware).
+- **Rule:** Settings that require restart should be explicit. Auto-save is appropriate only for non-destructive settings.
+
+## L13. Sample Rate dropdown visibility — template consistency
+
+- **Symptom:** Sample Rate dropdown worked correctly while Gain Mode didn't, despite similar structure.
+- **Root cause:** Sample Rate API returns numeric values (`2048000`, `2400000`) that exactly match option values (`"2048000"`, `"2400000"`). Gain Mode returned strings (`"manual"`, `"adaptive"`) not matching option values (`"0"`, `"1"`).
+- **Rule:** Maintain consistent value types between API responses and dropdown option values. If backend changes, update both ends or add client-side normalization.
+
+---
+
 ## Recurring meta-pattern (the big one)
 
 Almost every wrong turn above traces to **not verifying reality before acting**:
@@ -85,6 +116,7 @@ Almost every wrong turn above traces to **not verifying reality before acting**:
 - not checking the reference repo before building our own (L3),
 - not reading the chip revision from the esptool error (L5),
 - not reading the CPU-freq table for the silicon (L6),
-- not reading the mag stat as an RF gauge (L9).
+- not reading the mag stat as an RF gauge (L9),
+- not matching API response format to dropdown option values (L11).
 
 **The discipline: READ FIRST, VERIFY, THEN EDIT. Every tool answer is data. Interpret the data before changing code.**
