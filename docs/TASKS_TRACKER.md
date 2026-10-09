@@ -34,7 +34,7 @@
 | # | Decision | Options | Status |
 |---|---|---|---|
 | D1 | Decoder license path | OrcSDR AGPL port (rec.) / BSD libmodes lineage | Deferred (proceed with OrcSDR port, isolated for swap) |
-| D2 | AP credentials | SSID `Raga-Radar`, WPA2 key `raga@098` | **Cancelled** — board has no C6/WiFi; networking is Ethernet-only |
+| D2 | AP credentials | SSID `Raga-Radar`, WPA2 key `[redacted]` | **Cancelled** — board has no C6/WiFi; networking is Ethernet-only |
 | D3 | Ethernet PHY on board | Not connected; WiFi AP only for now | **Resolved** — IP101GRI RMII wired + working (DHCP 192.168.200.102) |
 | D4 | RF strategy while frames stay 0 | antenna placement / gain (44 dB manual now) vs. swap to proven `demod1090` path | Open — 44 dB wins current soak |
 | D5 | Local CPR fallback (<=60s/60NM) | implement behind pair hook | Open — not needed while global decode works; hook ready |

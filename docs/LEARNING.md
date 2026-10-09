@@ -106,6 +106,13 @@ Each entry: symptom → root cause → fix → the rule to follow forever.
 - **Root cause:** Sample Rate API returns numeric values (`2048000`, `2400000`) that exactly match option values (`"2048000"`, `"2400000"`). Gain Mode returned strings (`"manual"`, `"adaptive"`) not matching option values (`"0"`, `"1"`).
 - **Rule:** Maintain consistent value types between API responses and dropdown option values. If backend changes, update both ends or add client-side normalization.
 
+## L14. Live credential committed into docs, then published in a public repo
+
+- **Symptom:** After making the repo public, `docs/TASKS_TRACKER.md` was found to contain `WPA2 key raga@098` — the same string used as the Raspberry Pi SSH and `sudo` password.
+- **Root cause:** A decision-table row ("AP credentials") recorded a real secret verbatim. It was harmless while the repo was local-only, but publishing made it world-readable, and it also lives in git history (redacting the current file does not remove the old commits).
+- **Fix:** Redact the literal in the working tree; treat the secret as compromised and **rotate it** (change the Pi password). Verify with a repo-wide `grep` for `password|secret|token|wpa2|sshpass|ghp_` before publishing.
+- **Rule:** Secrets never belong in source, docs, or example configs — even in "cancelled"/historical rows. Publishing is irreversible; grep for credentials before the first push, and rotate anything that ever slipped in.
+
 ---
 
 ## Recurring meta-pattern (the big one)
