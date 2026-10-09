@@ -61,3 +61,10 @@
 2. Decide RF strategy (D4): reposition antenna / longer soak vs. swap decoder to proven `demod1090` path — now watchable live from the radar page.
 3. Once frames appear: validate track store end-to-end (pairing → `lat/lon`) in the UI, then Phase 7 (per-core pinning, metrics on `/api/status`).
 4. Flashing note: this session flashed via native `/dev/cu.usbmodem5B900947191`; capture via direct `pyserial` read works — avoid esptool `run`/`read_mac` while capturing (drops chip into download mode); re-flash resets into run mode.
+
+## 2026-10-09 — SDLC: public GitHub repo + AGENTS.md
+
+- Created public repo **github.com/ragavellur/ESP32-P4_DevKit_ADSB**; pushed `main` (13 commits) plus the 11 existing semver tags.
+- Added root **`AGENTS.md`** codifying the process: branch model (`main` + `feat/*`/`fix/*`/`docs/*`/`chore/*`), Conventional Commits, pre-flash verification gate (real HTML parse + `node --check` on JS + duplicate-identifier grep), mandatory docs updates (`LEARNING.md`/`TASKS_TRACKER.md`/`SESSION_SUMMARY.md`), build/flash commands, and the never-commit list.
+- Decode parity reference captured (read-only, from Pi `192.168.200.20`): Raspberry Pi runs `readsb` at 2.4 MSPS with `--gain auto --dcfilter --fix --preamble-threshold 24`; our P4 runs 2.048 MSPS manual gain. Parity work (2.4 MSPS correlation demod, auto gain, preamble threshold) is queued for Phase 3.
+- Note: Mac moved from `192.168.200.x` to `192.168.1.x`; Pi inspection is deferred until the Mac rejoins the `192.168.200.x` LAN.
