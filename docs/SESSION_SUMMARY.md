@@ -68,3 +68,15 @@
 - Added root **`AGENTS.md`** codifying the process: branch model (`main` + `feat/*`/`fix/*`/`docs/*`/`chore/*`), Conventional Commits, pre-flash verification gate (real HTML parse + `node --check` on JS + duplicate-identifier grep), mandatory docs updates (`LEARNING.md`/`TASKS_TRACKER.md`/`SESSION_SUMMARY.md`), build/flash commands, and the never-commit list.
 - Decode parity reference captured (read-only, from Pi `192.168.200.20`): Raspberry Pi runs `readsb` at 2.4 MSPS with `--gain auto --dcfilter --fix --preamble-threshold 24`; our P4 runs 2.048 MSPS manual gain. Parity work (2.4 MSPS correlation demod, auto gain, preamble threshold) is queued for Phase 3.
 - Note: Mac moved from `192.168.200.x` to `192.168.1.x`; Pi inspection is deferred until the Mac rejoins the `192.168.200.x` LAN.
+
+## 2026-10-12 — Fix mobile HUD panel overlap (`fix/mobile-hud-overlap`)
+
+- **Problem:** On phones the main control panel (`#ui`) and the Settings panel overlapped; Settings covered the Range/Sweep/Alt controls.
+- **Root cause:** Both panels were absolutely positioned in opposite corners; the `max-width:768px` media query restyled only `#ui`, leaving `#settings-panel` at `min-width:250px` → intersection at ~390px width.
+- **Change (only `main/radar_data/radar.html`):**
+  - Wrapped `#ui` + `#settings-panel` in new `#hud-stack`; `display:contents` on desktop (pixel-identical corners), flex column stack on small screens.
+  - Moved Settings panel positioning out of inline `style=` into a `#settings-panel` CSS rule so it is overridable.
+  - Mobile rules: full-width panels, `box-sizing:border-box`, `gap:8px`, `max-height:100dvh; overflow-y:auto`, per-content `max-height` + scroll, `touch-action:pan-y`; media query now `(max-width:768px), (max-height:520px)` so landscape phones also stack.
+- **Verified (no hardware):** HTML parsed (no nesting errors, no duplicate ids 28/28 unique); both `<script>` blocks pass `node --check`; measured bounding rects in a real browser — mobile 500×667 (expanded: no overlap, stack scrolls), landscape 844×390 (no overlap), desktop 1280×800 (stack `display:contents`, `#ui` top-left @15,15, Settings top-right @15 — unchanged). `idf.py build` clean (57% free).
+- **Pending:** on-device flash/visual check once the board is back on the LAN.
+- Next: `feat/web-receiver-location` (lat/lon from browser geolocation or manual entry, persisted in NVS, `/api/location`).

@@ -29,6 +29,17 @@
         
         #status { font-size: 11px; color: #00aa33; margin-top: 5px; }
         #user-location { font-size: 11px; color: #008822; border-top: 1px dashed #004400; padding-top: 5px; margin-top: 5px; }
+
+        /* HUD wrapper: transparent on desktop, so panels keep their corner positions */
+        #hud-stack { display: contents; }
+
+        /* Settings panel (positioning lives here, not inline, so mobile can override it) */
+        #settings-panel {
+            position: absolute; top: 15px; right: 15px;
+            background: rgba(0, 20, 0, 0.9); border: 1px solid #00ff41;
+            padding: 10px; font-size: 13px; z-index: 100; min-width: 250px;
+        }
+        #settings-content { display: none; padding-top: 10px; }
         
         canvas { display: block; filter: brightness(1.2); }
         
@@ -59,8 +70,22 @@
         input:checked + .slider { background-color: #005511; }
         input:checked + .slider:before { transform: translateX(16px); background-color: #00ff41; }
 
-        @media (max-width: 768px) {
-            #ui { width: 85vw; min-width: auto; max-width: 350px; }
+        @media (max-width: 768px), (max-height: 520px) {
+            /* Stack the HUD panels vertically; they can never overlap. */
+            #hud-stack {
+                position: fixed; top: 0; left: 0; right: 0;
+                display: flex; flex-direction: column; gap: 8px;
+                padding: 10px;
+                max-height: 100vh; max-height: 100dvh;
+                overflow-y: auto; touch-action: pan-y; z-index: 100;
+            }
+            #hud-stack > * {
+                position: static; top: auto; left: auto; right: auto;
+                width: 100%; max-width: none; min-width: 0; margin: 0;
+                box-sizing: border-box;
+            }
+            #ui-content { max-height: 40vh; max-height: 40dvh; overflow-y: auto; touch-action: pan-y; }
+            #settings-content { max-height: 50vh; max-height: 50dvh; overflow-y: auto; touch-action: pan-y; }
             input[type="number"], select { height: 28px; font-size: 14px; } 
             #tooltip.mobile-active {
                 top: auto !important; bottom: 20px !important; left: 50% !important;
@@ -72,6 +97,7 @@
 </head>
 <body>
 
+<div id="hud-stack">
 <div id="ui">
     <div id="ui-header" onclick="toggleMenu()">
         <span>Raga Radar - Pune</span>
@@ -110,6 +136,60 @@
     <div id="status">Waiting for sweep...</div>
     <div id="user-location">User GPS: Fetching...</div>
 </div>
+
+<!-- Settings Panel -->
+<div id="settings-panel">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; cursor: pointer;" onclick="toggleSettingsPanel()">
+        <strong>Settings</strong>
+        <span id="settingsToggleBtn">[+]</span>
+    </div>
+    <div id="settings-content">
+        <div class="control-row"><span>Gain (tenth dB):</span> <input type="number" id="setGain" value="496" min="0" max="496"></div>
+        <div class="control-row"><span>DC Filter:</span>
+            <label class="switch">
+                <input type="checkbox" id="setDcFilter">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="control-row"><span>Adaptive Gain:</span>
+            <label class="switch">
+                <input type="checkbox" id="setAdaptiveGain">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="control-row"><span>Gain Mode:</span>
+            <select id="setGainMode" style="background: #000; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; font-size: 12px; padding: 2px 5px; box-sizing: border-box;">
+                <option value="0" style="background: #000; color: #0f0;">Manual</option>
+                <option value="1" style="background: #000; color: #0f0;">Adaptive</option>
+            </select>
+        </div>
+        <div class="control-row"><span>Aggressive:</span>
+            <label class="switch">
+                <input type="checkbox" id="setAggressive">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="control-row"><span>CRC Fix:</span>
+            <label class="switch">
+                <input type="checkbox" id="setCrcFix">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="control-row"><span>Sample Rate (SPS):</span>
+            <select id="setSampleRate">
+                <option value="2048000">2048000 (2.048 MSPS)</option>
+                <option value="2400000">2400000 (2.4 MSPS)</option>
+            </select>
+        </div>
+        <div class="control-row" style="margin-top: 10px;">
+            <button id="btnResetSettings" style="width: 100%; background: #003300; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; padding: 8px; cursor: pointer;">Reset to Defaults</button>
+        </div>
+        <div class="control-row" style="margin-top: 10px;">
+            <button id="btnSaveSettings" style="width: 100%; background: #003300; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; padding: 8px; cursor: pointer;">Save Settings</button>
+        </div>
+    </div>
+</div>
+</div><!-- /#hud-stack -->
 
 <div id="tooltip"></div>
 <canvas id="radarCanvas"></canvas>
@@ -514,59 +594,6 @@
     fetchAircraftData();
     render();
 </script>
-
-<!-- Settings Panel -->
-<div id="settings-panel" style="position: absolute; top: 15px; right: 15px; background: rgba(0, 20, 0, 0.9); border: 1px solid #00ff41; padding: 10px; font-size: 13px; z-index: 100; min-width: 250px;">
-    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; cursor: pointer;" onclick="toggleSettingsPanel()">
-        <strong>Settings</strong>
-        <span id="settingsToggleBtn">[+]</span>
-    </div>
-    <div id="settings-content" style="display: none; padding-top: 10px;">
-        <div class="control-row"><span>Gain (tenth dB):</span> <input type="number" id="setGain" value="496" min="0" max="496"></div>
-        <div class="control-row"><span>DC Filter:</span>
-            <label class="switch">
-                <input type="checkbox" id="setDcFilter">
-                <span class="slider"></span>
-            </label>
-        </div>
-        <div class="control-row"><span>Adaptive Gain:</span>
-            <label class="switch">
-                <input type="checkbox" id="setAdaptiveGain">
-                <span class="slider"></span>
-            </label>
-        </div>
-        <div class="control-row"><span>Gain Mode:</span>
-            <select id="setGainMode" style="background: #000; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; font-size: 12px; padding: 2px 5px; box-sizing: border-box;">
-                <option value="0" style="background: #000; color: #0f0;">Manual</option>
-                <option value="1" style="background: #000; color: #0f0;">Adaptive</option>
-            </select>
-        </div>
-        <div class="control-row"><span>Aggressive:</span>
-            <label class="switch">
-                <input type="checkbox" id="setAggressive">
-                <span class="slider"></span>
-            </label>
-        </div>
-        <div class="control-row"><span>CRC Fix:</span>
-            <label class="switch">
-                <input type="checkbox" id="setCrcFix">
-                <span class="slider"></span>
-            </label>
-        </div>
-        <div class="control-row"><span>Sample Rate (SPS):</span>
-            <select id="setSampleRate">
-                <option value="2048000">2048000 (2.048 MSPS)</option>
-                <option value="2400000">2400000 (2.4 MSPS)</option>
-            </select>
-        </div>
-        <div class="control-row" style="margin-top: 10px;">
-            <button id="btnResetSettings" style="width: 100%; background: #003300; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; padding: 8px; cursor: pointer;">Reset to Defaults</button>
-        </div>
-        <div class="control-row" style="margin-top: 10px;">
-            <button id="btnSaveSettings" style="width: 100%; background: #003300; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; padding: 8px; cursor: pointer;">Save Settings</button>
-        </div>
-    </div>
-</div>
 
 <script>
     let settingsOpen = false;

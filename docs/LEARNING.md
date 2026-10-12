@@ -113,6 +113,13 @@ Each entry: symptom → root cause → fix → the rule to follow forever.
 - **Fix:** Redact the literal in the working tree; treat the secret as compromised and **rotate it** (change the Pi password). Verify with a repo-wide `grep` for `password|secret|token|wpa2|sshpass|ghp_` before publishing.
 - **Rule:** Secrets never belong in source, docs, or example configs — even in "cancelled"/historical rows. Publishing is irreversible; grep for credentials before the first push, and rotate anything that ever slipped in.
 
+## L15. Two corner-anchored HUD panels overlapped on mobile
+
+- **Symptom:** On a phone, the main control panel (`#ui`, top-left) and the Settings panel (`#settings-panel`, top-right) overlapped and the Settings panel covered the NM/Sweep controls.
+- **Root cause:** Both panels were `position:absolute` pinned to opposite corners. The `@media (max-width:768px)` block only restyled `#ui` (to `width:85vw`) and **never touched `#settings-panel`**, which kept `min-width:250px`; at ~390px viewport the two boxes intersected, and the later-in-DOM panel painted on top. The collapsed `#ui` also stayed 85vw wide, so even closed it collided.
+- **Fix:** Wrap both panels in `#hud-stack`. Desktop keeps the exact corner layout via `#hud-stack{display:contents}` (wrapper generates no box). On small screens the wrapper becomes a `position:fixed; display:flex; flex-direction:column; max-height:100dvh; overflow-y:auto` column, so panels flow vertically and cannot overlap; each gets `box-sizing:border-box; width:100%`. Moved the Settings panel's positional styles out of the inline `style=` (inline would beat the stylesheet) into a `#settings-panel` rule so mobile can override. Added `(max-height:520px)` to the media query so landscape phones (which are >768px wide) also stack.
+- **Rule:** Never anchor two variable-height HUD panels to two corners and assume a max-width media query fixes mobile — restyle **every** panel, prefer a single flex/stack container, keep layout rules in the stylesheet (not inline) so they can be overridden, and verify with measured bounding-client-rects at multiple viewport sizes, not by eye.
+
 ---
 
 ## Recurring meta-pattern (the big one)
