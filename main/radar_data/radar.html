@@ -217,13 +217,18 @@
     const uiContent = document.getElementById('ui-content');
     const toggleBtn = document.getElementById('toggleBtn');
     
-    uiContent.style.display = menuOpen ? 'block' : 'none';
-    toggleBtn.innerText = menuOpen ? '[-]' : '[+]';
+    function applyMenuState() {
+        const disp = menuOpen ? 'block' : 'none';
+        uiContent.style.display = disp;
+        statusDiv.style.display = disp;
+        userLocDiv.style.display = disp;
+        toggleBtn.innerText = menuOpen ? '[-]' : '[+]';
+    }
+    applyMenuState();
 
     function toggleMenu() {
         menuOpen = !menuOpen;
-        uiContent.style.display = menuOpen ? 'block' : 'none';
-        toggleBtn.innerText = menuOpen ? '[-]' : '[+]';
+        applyMenuState();
     }
 
     window.closeTarget = function() {

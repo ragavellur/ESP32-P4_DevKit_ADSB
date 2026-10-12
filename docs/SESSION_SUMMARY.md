@@ -89,3 +89,11 @@
 - **Caveat (LEARNING L16):** browser geolocation requires a secure context; on plain-HTTP LAN it fails, so manual entry is the reliable path. The UI shows a clear message when detection fails.
 - **Verified (no hardware):** HTML parsed clean (33 unique ids), both scripts pass `node --check`, `idf.py build` clean (57% free). Functional browser test against a local mock server: loadLocation fills inputs; Apply persists + updates `receiverLat/Lon`; out-of-range rejected client-side (server untouched); geolocation success fills fields, failure shows manual-entry hint.
 - **Pending:** on-device flash + real-browser check (geolocation will fail over HTTP; manual entry is expected to work).
+
+## 2026-10-12 — "Raga Radar - Pune" panel did not fully collapse
+
+- **Report:** After collapsing the top-left panel, the `SYNC ERR: Failed to fetch` and `User GPS: …` lines stayed visible, so it looked un-collapsed.
+- **Root cause:** `toggleMenu()` only toggled `#ui-content`; `#status` and `#user-location` are siblings inside `#ui` but were **outside** `#ui-content`, so they were never hidden. (LEARNING L17.)
+- **Fix (`radar.html`):** replaced the inline two-line toggle with `applyMenuState()`, which sets display on `#ui-content`, `#status`, and `#user-location` together and updates the `[+]/[-]` label; called on load and on every toggle.
+- **Verified (no hardware):** both scripts pass `node --check`; browser test — desktop reload shows all expanded; mobile (500×667) reload starts fully collapsed (status/SYNC ERR hidden), expands to show all, collapses fully again.
+- **Note:** `SYNC ERR: Failed to fetch` is the `/data/aircraft.json` fetch failing at the network level (device unreachable from the browser), not a UI regression; it now correctly hides when collapsed.
