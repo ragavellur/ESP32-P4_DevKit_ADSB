@@ -181,6 +181,16 @@
                 <option value="2400000">2400000 (2.4 MSPS)</option>
             </select>
         </div>
+        <div style="border-top: 1px dashed #004400; margin: 10px 0 8px; padding-top: 8px;">Receiver Location</div>
+        <div class="control-row"><span>Latitude:</span> <input type="number" id="setLat" step="0.000001" value="18.480718" style="width: 100px;"></div>
+        <div class="control-row"><span>Longitude:</span> <input type="number" id="setLon" step="0.000001" value="73.898235" style="width: 100px;"></div>
+        <div class="control-row" style="margin-top: 8px;">
+            <button id="btnUseBrowserLoc" style="width: 100%; background: #003300; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; padding: 8px; cursor: pointer;">Use Browser Location</button>
+        </div>
+        <div class="control-row" style="margin-top: 8px;">
+            <button id="btnApplyLocation" style="width: 100%; background: #003300; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; padding: 8px; cursor: pointer;">Apply Location</button>
+        </div>
+        <div id="loc-status" style="font-size: 11px; color: #00aa33; min-height: 14px; text-align: center;"></div>
         <div class="control-row" style="margin-top: 10px;">
             <button id="btnResetSettings" style="width: 100%; background: #003300; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; padding: 8px; cursor: pointer;">Reset to Defaults</button>
         </div>
@@ -612,13 +622,21 @@
         btnSave: document.getElementById("btnSaveSettings")
     };
 
+    const locationForm = {
+        lat: document.getElementById("setLat"),
+        lon: document.getElementById("setLon"),
+        btnBrowser: document.getElementById("btnUseBrowserLoc"),
+        btnApply: document.getElementById("btnApplyLocation"),
+        status: document.getElementById("loc-status")
+    };
+
     window.toggleSettingsPanel = (function() {
         let settingsOpen = false;
         return function() {
             settingsOpen = !settingsOpen;
             settingsContent.style.display = settingsOpen ? "block" : "none";
             settingsToggleBtn.innerText = settingsOpen ? "[-]" : "[+]";
-            if (settingsOpen) loadSettings();
+            if (settingsOpen) { loadSettings(); loadLocation(); }
         };
     })();
 
@@ -685,6 +703,66 @@
         }
     }
 
+    // --- Receiver Location ---
+    function setLocStatus(msg, ok) {
+        if (!locationForm.status) return;
+        locationForm.status.textContent = msg;
+        locationForm.status.style.color = ok ? "#00aa33" : "#ff5555";
+    }
+
+    async function loadLocation() {
+        try {
+            const r = await fetch("/api/location");
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            const s = await r.json();
+            if (locationForm.lat && typeof s.lat === "number") locationForm.lat.value = s.lat;
+            if (locationForm.lon && typeof s.lon === "number") locationForm.lon.value = s.lon;
+            setLocStatus("", true);
+        } catch (err) {
+            console.error("Failed to load location:", err);
+        }
+    }
+
+    function useBrowserLocation() {
+        if (!navigator.geolocation) {
+            setLocStatus("Geolocation not supported — enter lat/lon manually.", false);
+            return;
+        }
+        setLocStatus("Requesting browser location…", true);
+        navigator.geolocation.getCurrentPosition((pos) => {
+            locationForm.lat.value = pos.coords.latitude.toFixed(6);
+            locationForm.lon.value = pos.coords.longitude.toFixed(6);
+            setLocStatus("Detected — press Apply Location.", true);
+        }, (err) => {
+            setLocStatus("Browser location unavailable — enter lat/lon manually.", false);
+        }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+    }
+
+    async function applyLocation() {
+        const lat = parseFloat(locationForm.lat.value);
+        const lon = parseFloat(locationForm.lon.value);
+        if (!isFinite(lat) || !isFinite(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+            setLocStatus("Invalid lat/lon (lat -90..90, lon -180..180).", false);
+            return;
+        }
+        try {
+            const r = await fetch("/api/location", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ lat: lat, lon: lon })
+            });
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            const s = await r.json();
+            // Re-center the radar immediately with the new reference.
+            receiverLat = s.lat;
+            receiverLon = s.lon;
+            if (typeof loadReceiver === "function") loadReceiver();
+            setLocStatus("Location applied.", true);
+        } catch (err) {
+            setLocStatus("Failed to apply: " + err.message, false);
+        }
+    }
+
     // Event listeners (no auto-save on change)
     if (settingsForm.gain) settingsForm.gain.addEventListener("change", () => {});
     if (settingsForm.dcFilter) settingsForm.dcFilter.addEventListener("change", () => {});
@@ -695,8 +773,11 @@
     if (settingsForm.sampleRate) settingsForm.sampleRate.addEventListener("change", () => {});
     if (settingsForm.btnReset) settingsForm.btnReset.addEventListener("click", resetSettings);
     if (settingsForm.btnSave) settingsForm.btnSave.addEventListener("click", saveSettings);
+    if (locationForm.btnBrowser) locationForm.btnBrowser.addEventListener("click", useBrowserLocation);
+    if (locationForm.btnApply) locationForm.btnApply.addEventListener("click", applyLocation);
 
 loadSettings();
+loadLocation();
 </script>
 </body>
 </html>

@@ -1,6 +1,8 @@
 #include <inttypes.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
@@ -37,10 +39,12 @@ static void nvs_load_receiver(void)
     nvs_handle_t h;
     int32_t lat = 0, lon = 0;
     if (nvs_open("radar", NVS_READONLY, &h) != ESP_OK) return;
-    if (nvs_get_i32(h, "lat", &lat) == ESP_OK && lat != 0)
+    /* Accept any stored value including 0.0 (equator/prime meridian). */
+    if (nvs_get_i32(h, "lat", &lat) == ESP_OK &&
+        nvs_get_i32(h, "lon", &lon) == ESP_OK) {
         s_receiver_lat = lat / 1e7;
-    if (nvs_get_i32(h, "lon", &lon) == ESP_OK && lon != 0)
         s_receiver_lon = lon / 1e7;
+    }
     nvs_close(h);
 }
 
@@ -55,6 +59,12 @@ void http_radar_set_receiver(double lat, double lon)
     nvs_set_i32(h, "lon", (int32_t)(lon * 1e7));
     nvs_commit(h);
     nvs_close(h);
+}
+
+void http_radar_get_receiver(double *lat, double *lon)
+{
+    if (lat) *lat = s_receiver_lat;
+    if (lon) *lon = s_receiver_lon;
 }
 
 /* Keep dump1090-ish shape so existing clients can parse it. */
@@ -170,6 +180,68 @@ static esp_err_t h_status_json(httpd_req_t *req)
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, buf, strlen(buf));
+}
+
+/* ----- Receiver location API ----- */
+
+static esp_err_t h_location_get(httpd_req_t *req)
+{
+    char buf[96];
+    snprintf(buf, sizeof(buf), "{\"lat\":%.6f,\"lon\":%.6f}",
+             s_receiver_lat, s_receiver_lon);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, buf, strlen(buf));
+}
+
+static esp_err_t h_location_post(httpd_req_t *req)
+{
+    int content_len = req->content_len;
+    if (content_len <= 0 || content_len > 256) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid content length");
+        return ESP_FAIL;
+    }
+
+    char buf[257];
+    int received = httpd_req_recv(req, buf, content_len);
+    if (received <= 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
+        return ESP_FAIL;
+    }
+    buf[received] = '\0';
+
+    char *p = strstr(buf, "\"lat\"");
+    char *q = strstr(buf, "\"lon\"");
+    if (!p || !q) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "lat and lon required");
+        return ESP_FAIL;
+    }
+    p = strchr(p, ':');
+    q = strchr(q, ':');
+    if (!p || !q) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "malformed lat/lon");
+        return ESP_FAIL;
+    }
+
+    double lat = strtod(p + 1, NULL);
+    double lon = strtod(q + 1, NULL);
+    if (!isfinite(lat) || !isfinite(lon) ||
+        lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "lat must be -90..90, lon -180..180");
+        return ESP_FAIL;
+    }
+
+    http_radar_set_receiver(lat, lon);
+    ESP_LOGI(TAG, "receiver location set: %.6f, %.6f", lat, lon);
+
+    char resp[96];
+    snprintf(resp, sizeof(resp), "{\"lat\":%.6f,\"lon\":%.6f}", lat, lon);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+    return httpd_resp_send(req, resp, strlen(resp));
 }
 
 /* ----- Settings API ----- */
@@ -507,6 +579,14 @@ esp_err_t http_radar_start(void)
         .uri = "/api/status", .method = HTTP_GET,
         .handler = h_status_json, .user_ctx = NULL
     };
+    const httpd_uri_t r_loc_get = {
+        .uri = "/api/location", .method = HTTP_GET,
+        .handler = h_location_get, .user_ctx = NULL
+    };
+    const httpd_uri_t r_loc_post = {
+        .uri = "/api/location", .method = HTTP_POST,
+        .handler = h_location_post, .user_ctx = NULL
+    };
     const httpd_uri_t r_settings_get = {
         .uri = "/api/settings", .method = HTTP_GET,
         .handler = h_settings_get, .user_ctx = NULL
@@ -523,6 +603,8 @@ esp_err_t http_radar_start(void)
         httpd_register_uri_handler(server, &r_root)   != ESP_OK ||
         httpd_register_uri_handler(server, &r_feed)   != ESP_OK ||
         httpd_register_uri_handler(server, &r_status) != ESP_OK ||
+        httpd_register_uri_handler(server, &r_loc_get)  != ESP_OK ||
+        httpd_register_uri_handler(server, &r_loc_post) != ESP_OK ||
         httpd_register_uri_handler(server, &r_settings_get)  != ESP_OK ||
         httpd_register_uri_handler(server, &r_settings_post) != ESP_OK ||
         httpd_register_uri_handler(server, &r_settings_reset) != ESP_OK) {
@@ -531,6 +613,6 @@ esp_err_t http_radar_start(void)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "server up: / /radar /data/aircraft.json /api/status /api/settings");
+    ESP_LOGI(TAG, "server up: / /radar /data/aircraft.json /api/status /api/settings /api/location");
     return ESP_OK;
 }
