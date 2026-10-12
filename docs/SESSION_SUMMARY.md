@@ -80,3 +80,12 @@
 - **Verified (no hardware):** HTML parsed (no nesting errors, no duplicate ids 28/28 unique); both `<script>` blocks pass `node --check`; measured bounding rects in a real browser — mobile 500×667 (expanded: no overlap, stack scrolls), landscape 844×390 (no overlap), desktop 1280×800 (stack `display:contents`, `#ui` top-left @15,15, Settings top-right @15 — unchanged). `idf.py build` clean (57% free).
 - **Pending:** on-device flash/visual check once the board is back on the LAN.
 - Next: `feat/web-receiver-location` (lat/lon from browser geolocation or manual entry, persisted in NVS, `/api/location`).
+
+## 2026-10-12 — Receiver location from the web UI (`feat/web-receiver-location`)
+
+- **Feature:** set the radar reference lat/lon from the browser (for travelling), persisted in NVS and applied live.
+- **Firmware (`http_radar.c`/`.h`):** new `GET /api/location` → `{lat,lon}`; new `POST /api/location` (parses `lat`/`lon`, validates finite + ±90/±180, else `400`) → `http_radar_set_receiver()` (NVS + in-memory) → echoes values. Declared `http_radar_set_receiver`/`http_radar_get_receiver` in the header. `nvs_load_receiver()` now accepts a stored `0.0` (presence-based, not `!=0`). 9 URI handlers registered.
+- **UI (`radar.html`):** Settings panel "Receiver Location" section — Latitude/Longitude inputs, **Use Browser Location** (fills fields only; expects manual Apply), **Apply Location** (POSTs and re-centers the sweep immediately by updating the global `receiverLat/Lon`), plus an inline status line for success/errors.
+- **Caveat (LEARNING L16):** browser geolocation requires a secure context; on plain-HTTP LAN it fails, so manual entry is the reliable path. The UI shows a clear message when detection fails.
+- **Verified (no hardware):** HTML parsed clean (33 unique ids), both scripts pass `node --check`, `idf.py build` clean (57% free). Functional browser test against a local mock server: loadLocation fills inputs; Apply persists + updates `receiverLat/Lon`; out-of-range rejected client-side (server untouched); geolocation success fills fields, failure shows manual-entry hint.
+- **Pending:** on-device flash + real-browser check (geolocation will fail over HTTP; manual entry is expected to work).

@@ -119,7 +119,7 @@ Phase 4 verified by host unit test `tests/host/test_adsb_state.c` (pace, pairing
 | 6.6 | Radar page accepts receiver coords (replace hardcoded Pune const) | Complete |
 | 6.7 | Verify page on phone/PC over LAN (Ethernet) | In Progress — verified via curl + headless Chrome on 192.168.200.102; final user check on devices pending |
 | 6.8 | Responsive mobile layout: `#ui` + Settings panels stacked (no overlap) | Complete — `#hud-stack` flex column on ≤768px / ≤520px height; desktop unchanged; browser-measured. Device visual check pending |
-| 6.9 | Receiver lat/lon from web UI (browser geolocation or manual entry, NVS-persisted) | Not Started — planned as `feat/web-receiver-location` |
+| 6.9 | Receiver lat/lon from web UI (browser geolocation or manual entry, NVS-persisted) | Complete — `/api/location` GET/POST; Settings panel lat/lon + Use Browser Location + Apply; immediate re-center. Device visual check pending |
 
 ## Phase 7 — Core optimization & validation
 
@@ -141,3 +141,4 @@ Phase 4 verified by host unit test `tests/host/test_adsb_state.c` (pace, pairing
 | 2026-09-19 | Created tracker from approved implementation plan |
 | 2026-09-19 | Phases 5–6: board has **no C6/WiFi** (schematic-verified) → Ethernet-only. EMAC+IP101GRI netif up, DHCP 192.168.200.102; httpd serving radar page fully (curl + headless Chrome verified). Wifi/ESP-Hosted wiring removed (`wifi_ap.*`, esp_wifi/esp_hosted deps). |
 | 2026-10-12 | Phase 6.8: fixed mobile HUD overlap — wrapped `#ui` + `#settings-panel` in `#hud-stack` (`display:contents` desktop; flex column ≤768px/≤520px height). Moved Settings positioning to CSS. LEARNING L15. Verified via browser-measured rects + `idf.py build`. |
+| 2026-10-12 | Phase 6.9: receiver location from web UI — new `GET`/`POST /api/location` (validated, NVS-persisted via `http_radar_set_receiver`), header getter/setter, NVS 0,0 accepted. Settings panel "Receiver Location" (lat/lon inputs + Use Browser Location + Apply, instant re-center). LEARNING L16 (geolocation needs secure context). Verified with mock-server browser test + `idf.py build`. |

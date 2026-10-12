@@ -120,6 +120,13 @@ Each entry: symptom → root cause → fix → the rule to follow forever.
 - **Fix:** Wrap both panels in `#hud-stack`. Desktop keeps the exact corner layout via `#hud-stack{display:contents}` (wrapper generates no box). On small screens the wrapper becomes a `position:fixed; display:flex; flex-direction:column; max-height:100dvh; overflow-y:auto` column, so panels flow vertically and cannot overlap; each gets `box-sizing:border-box; width:100%`. Moved the Settings panel's positional styles out of the inline `style=` (inline would beat the stylesheet) into a `#settings-panel` rule so mobile can override. Added `(max-height:520px)` to the media query so landscape phones (which are >768px wide) also stack.
 - **Rule:** Never anchor two variable-height HUD panels to two corners and assume a max-width media query fixes mobile — restyle **every** panel, prefer a single flex/stack container, keep layout rules in the stylesheet (not inline) so they can be overridden, and verify with measured bounding-client-rects at multiple viewport sizes, not by eye.
 
+## L16. Browser geolocation does not work on plain-HTTP LAN origins
+
+- **Symptom:** "Use Browser Location" would fail on the device's `http://192.168.200.102/` page even though the same code works elsewhere.
+- **Root cause:** `navigator.geolocation` requires a **secure context** (HTTPS, or `localhost`). A device served over plain HTTP on a LAN IP is not secure, so Chrome/Safari/Firefox reject the call. The browser does not fail loudly — the error callback fires.
+- **Fix:** Treat geolocation as best-effort: try it, and on failure show an explicit "enter lat/lon manually" message. Manual entry is the reliable path and must always be available. (Serving self-signed HTTPS is possible but larger scope.)
+- **Rule:** Never depend on a secure-context-only browser API for a device UI served over plain HTTP. Provide a manual fallback for every such feature, and tell the user *why* the convenience path failed.
+
 ---
 
 ## Recurring meta-pattern (the big one)
