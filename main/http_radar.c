@@ -334,6 +334,38 @@ static esp_err_t h_settings_get(httpd_req_t *req)
     return httpd_resp_send(req, buf, strlen(buf));
 }
 
+/* Extract the scalar value for a JSON key, bounded to that value only.
+ * Copies the value token into out with surrounding spaces and any trailing
+ * ',', '}', ']' stripped. Returns true if the key was found.
+ *
+ * This avoids the classic bug where a substring search for "true"/"false"
+ * spills past the field and matches a *different* key's value. */
+static bool json_get_value(const char *buf, const char *key, char *out, size_t out_sz)
+{
+    if (!buf || !key || !out || out_sz == 0) return false;
+
+    char pattern[64];
+    int n = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
+    if (n <= 0 || (size_t)n >= sizeof(pattern)) return false;
+
+    const char *p = strstr(buf, pattern);
+    if (!p) return false;
+
+    p = strchr(p + n, ':');
+    if (!p) return false;
+    p++;
+    while (*p == ' ' || *p == '\t') p++;
+
+    size_t i = 0;
+    while (*p && *p != ',' && *p != '}' && *p != ']' && i + 1 < out_sz) {
+        out[i++] = *p++;
+    }
+    if (i == 0) return false;
+    while (i > 0 && (out[i - 1] == ' ' || out[i - 1] == '\t')) i--;
+    out[i] = '\0';
+    return i > 0;
+}
+
 static esp_err_t h_settings_post(httpd_req_t *req)
 {
     /* Parse JSON body */
@@ -357,7 +389,7 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     }
     buf[received] = '\0';
 
-    /* Simple JSON parsing for our known fields */
+    /* Parse our known fields with value-bounded lookup (see json_get_value). */
     int gain = -1;
     int dc_filter = -1;
     int adaptive_gain = -1;
@@ -366,57 +398,34 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     int crc_fix = -1;
     int sample_rate_sps = -1;
 
-    char *p = strstr(buf, "\"gain\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) gain = atoi(p + 1);
+    char val[64];
+
+    if (json_get_value(buf, "gain", val, sizeof(val))) {
+        gain = atoi(val);
     }
-    p = strstr(buf, "\"dc_filter\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            if (strstr(p, "true")) dc_filter = 1;
-            else if (strstr(p, "false")) dc_filter = 0;
-        }
+    if (json_get_value(buf, "dc_filter", val, sizeof(val))) {
+        if (strcmp(val, "true") == 0) dc_filter = 1;
+        else if (strcmp(val, "false") == 0) dc_filter = 0;
     }
-    p = strstr(buf, "\"adaptive_gain\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            if (strstr(p, "true")) adaptive_gain = 1;
-            else if (strstr(p, "false")) adaptive_gain = 0;
-        }
+    if (json_get_value(buf, "adaptive_gain", val, sizeof(val))) {
+        if (strcmp(val, "true") == 0) adaptive_gain = 1;
+        else if (strcmp(val, "false") == 0) adaptive_gain = 0;
     }
-    p = strstr(buf, "\"gain_mode\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            if (strstr(p, "adaptive")) gain_mode = 1;
-            else if (strstr(p, "manual")) gain_mode = 0;
-            else if (strstr(p, "1")) gain_mode = 1;
-            else if (strstr(p, "0")) gain_mode = 0;
-        }
+    if (json_get_value(buf, "gain_mode", val, sizeof(val))) {
+        if (strcmp(val, "adaptive") == 0) gain_mode = 1;
+        else if (strcmp(val, "manual") == 0) gain_mode = 0;
+        else gain_mode = (atoi(val) != 0) ? 1 : 0;
     }
-    p = strstr(buf, "\"aggressive\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            if (strstr(p, "true")) aggressive = 1;
-            else if (strstr(p, "false")) aggressive = 0;
-        }
+    if (json_get_value(buf, "aggressive", val, sizeof(val))) {
+        if (strcmp(val, "true") == 0) aggressive = 1;
+        else if (strcmp(val, "false") == 0) aggressive = 0;
     }
-    p = strstr(buf, "\"crc_fix\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) {
-            if (strstr(p, "true")) crc_fix = 1;
-            else if (strstr(p, "false")) crc_fix = 0;
-        }
+    if (json_get_value(buf, "crc_fix", val, sizeof(val))) {
+        if (strcmp(val, "true") == 0) crc_fix = 1;
+        else if (strcmp(val, "false") == 0) crc_fix = 0;
     }
-    p = strstr(buf, "\"sample_rate_sps\"");
-    if (p) {
-        p = strchr(p, ':');
-        if (p) sample_rate_sps = atoi(p + 1);
+    if (json_get_value(buf, "sample_rate_sps", val, sizeof(val))) {
+        sample_rate_sps = atoi(val);
     }
     free(buf);
 

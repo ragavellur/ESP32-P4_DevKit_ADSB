@@ -151,12 +151,6 @@
                 <span class="slider"></span>
             </label>
         </div>
-        <div class="control-row"><span>Adaptive Gain:</span>
-            <label class="switch">
-                <input type="checkbox" id="setAdaptiveGain">
-                <span class="slider"></span>
-            </label>
-        </div>
         <div class="control-row"><span>Gain Mode:</span>
             <select id="setGainMode" style="background: #000; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; font-size: 12px; padding: 2px 5px; box-sizing: border-box;">
                 <option value="0" style="background: #000; color: #0f0;">Manual</option>
@@ -706,7 +700,6 @@
     const settingsForm = {
         gain: document.getElementById("setGain"),
         dcFilter: document.getElementById("setDcFilter"),
-        adaptiveGain: document.getElementById("setAdaptiveGain"),
         gainMode: document.getElementById("setGainMode"),
         aggressive: document.getElementById("setAggressive"),
         crcFix: document.getElementById("setCrcFix"),
@@ -740,7 +733,6 @@
             const s = await r.json();
             if (settingsForm.gain) settingsForm.gain.value = s.gain;
             if (settingsForm.dcFilter) settingsForm.dcFilter.checked = s.dc_filter;
-            if (settingsForm.adaptiveGain) settingsForm.adaptiveGain.checked = s.adaptive_gain;
             if (settingsForm.gainMode) {
                 const gm = s.gain_mode;
                 if (gm === 0 || gm === "0" || gm === "manual") {
@@ -760,11 +752,12 @@
     }
 
     async function saveSettings() {
+        const gainMode = parseInt(settingsForm.gainMode.value, 10);
         const body = {
             gain: parseInt(settingsForm.gain.value),
             dc_filter: settingsForm.dcFilter.checked,
-            adaptive_gain: settingsForm.adaptiveGain.checked,
-            gain_mode: parseInt(settingsForm.gainMode.value, 10),
+            adaptive_gain: gainMode === 1,
+            gain_mode: gainMode,
             aggressive: settingsForm.aggressive.checked,
             crc_fix: settingsForm.crcFix.checked,
             sample_rate_sps: parseInt(settingsForm.sampleRate.value)
@@ -860,7 +853,6 @@
     // Event listeners (no auto-save on change)
     if (settingsForm.gain) settingsForm.gain.addEventListener("change", () => {});
     if (settingsForm.dcFilter) settingsForm.dcFilter.addEventListener("change", () => {});
-    if (settingsForm.adaptiveGain) settingsForm.adaptiveGain.addEventListener("change", () => {});
     if (settingsForm.gainMode) settingsForm.gainMode.addEventListener("change", () => {});
     if (settingsForm.aggressive) settingsForm.aggressive.addEventListener("change", () => {});
     if (settingsForm.crcFix) settingsForm.crcFix.addEventListener("change", () => {});

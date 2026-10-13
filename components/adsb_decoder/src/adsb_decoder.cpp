@@ -233,8 +233,11 @@ constexpr size_t kFrameSamples_2048 = 246;
 
   if (sample_rate_sps_ == 2400000) {
     kFrameSamples = kFrameSamples_2400;
-    bit_spacing = 1200;
-    half_bit_spacing = 600;
+    /* One Mode-S bit is 1.0 us. At 2.4 MSPS that is 2.4 samples = 2400
+     * milli-samples (see interpolate(): indices are in milli-samples).
+     * These must scale with the sample rate, not be halved. */
+    bit_spacing = 2400;
+    half_bit_spacing = 1200;
     first_center_min = 17000;
     first_center_max = 21000;
     size_t pidx[4] = {1, 3, 9, 11};

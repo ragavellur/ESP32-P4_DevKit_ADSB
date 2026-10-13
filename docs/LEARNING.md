@@ -175,3 +175,23 @@ Almost every wrong turn above traces to **not verifying reality before acting**:
 - **Context:** The HUD title was a hardcoded "Raga Radar - Pune" and did not follow the configured receiver location.
 - **Decision:** Label the location with the **nearest major city from an embedded table** (Haversine over ~75 Indian city centroids) and fall back to `lat, lon` when nothing is within 150 km. This keeps the title working with **no internet** and avoids another CORS/rate-limit dependency (cf. L18).
 - **Rule:** For a small, bounded, latency-free lookup (labeling a location), prefer a bundled table over a network geocoder. Reserve external APIs for data that genuinely cannot be embedded.
+
+---
+
+## L21. Settings POST parser matched `true`/`false` anywhere in the body
+
+- **Symptom:** Toggling **DC Filter** or **Adaptive Gain** off in the web UI appeared to do nothing; `/api/settings` kept echoing `true`. Turning off one switch seemed to silently re-enable it.
+- **Root cause:** `h_settings_post()` located each key with `strstr(buf, "\"key\"")`, then found the `:` and ran `strstr(p, "true")` / `strstr(p, "false")` from that point. `strstr` scans the *rest of the whole body*, not the value of that key. So `"adaptive_gain":false` followed later by `"aggressive":true` was parsed as `adaptive_gain = true`. Any `false` field whose name sorts before a `true` field was corrupted. (Both `dc_filter` and `adaptive_gain` are affected.)
+- **Fix:** Added `json_get_value()` — a tiny bounded extractor that reads from the `:` up to the next `,`/`}`/`]`, trims spaces, and returns just that value. All fields (`gain`, `gain_mode`, `sample_rate_sps`, `dc_filter`, `adaptive_gain`, `aggressive`, `crc_fix`) now compare the extracted token, not a global substring. Numeric `gain_mode` still accepts `0`/`1` or `manual`/`adaptive`.
+- **Also:** `adaptive_gain` is **vestigial** — `adaptive_gain_step()` gates on `gain_mode` (`rtl_pipeline.c:280`), not `adaptive_gain`. The duplicate "Adaptive Gain" checkbox was removed; **Gain Mode** (Manual/Adaptive) is the single control, and the POST derives `adaptive_gain` from it. 
+- **Rule:** Never `strstr` a JSON body for a boolean literal — it matches *anywhere*. Extract the value between delimiters for the specific key. Prefer a real parser if the payload ever grows.
+
+---
+
+## L22. Bit spacing must scale with sample rate (2.4 MSPS was half the right value)
+
+- **Symptom:** Selecting **2400000** sps made the decoder produce **0 frames** while 2048000 sps decoded normally; `effective_sps` confirmed the pipeline really ran at 2.4 MSPS.
+- **Root cause:** In `AdsbDecoder::detect()` the per-rate constants were `bit_spacing = 1200` and `half_bit_spacing = 600` for 2.4 MSPS, versus `2048`/`1024` for 2.048 MSPS. `interpolate()` indexes samples in **milli-samples**, so one Mode-S bit (1.0 µs) is `sample_rate * 1000 / 1e6` milli-samples: **2048** at 2.048 MSPS and **2400** at 2.4 MSPS. 1200 is half of a bit — every bit sample point landed mid-bit, so framing was garbage. The other 2.4 constants (`kFrameSamples = 288 = 120 µs × 2.4`, `first_center ≈ 8 µs`) were already consistent with 2400, which corroborated the bug.
+- **Fix:** `bit_spacing = 2400`, `half_bit_spacing = 1200` (`adsb_decoder.cpp:239-240`).
+- **Rule:** Any timing constant tied to sample rate must be derived from `sample_rate × time`, never hand-tuned per branch. When one constant in a branch disagrees with the others, suspect a typo, not a design.
+
