@@ -146,3 +146,13 @@
 - **Flashed + boot-verified:** confirmed `gain=42.1` survives the reboot (NVS intact), `rf=1`, `over=0 drops=0`, crc climbing, real callsigns decoding (IGO107C, …), and `/api/status` now reports `"phase":"streaming"` and the true `programmed_sps`.
 - **Note:** a build was flashed mid-way that still had the `phase` bug; the `/api/status` gate was corrected and re-flashed. Root cause of the earlier boot-time `gain=49.6 / crc=0` blip was traced to a stale NVS value from before (settings_load runs before the tasks; no race) — the current NVS holds 42.1 dB and persists correctly.
 - **Pending:** commit on a branch (`fix/...`) + tag, pending the user's go-ahead. Open items unchanged: `/api/settings` defaults footgun (7.11) and 2.4 MSPS (7.10).
+
+## 2026-10-13 (last) — Gain re-characterised: it is a range/frame-rate trade-off
+
+- **Trigger:** After flashing the health-alert build the user saw fewer aircraft than the earlier "16 aircraft / 250 NM" reading and asked whether this build had regressed. **It had not:** `git diff` shows the build touches only `rtl_pipeline.[ch]` (5 read-only status fields + `phase`/`programmed_sps` fix), `http_radar.c` (2 extra JSON keys) and `radar.html` (alert banner) — **no decoder/`adsb_decoder` files**. The difference was the **operating point**, not the code.
+- **A/B (2048 kSPS, dc_filter/aggressive/crc_fix ON, all else held constant):**
+  - **35.0 dB** → ~5.5 crc/s, tracks 3-5, `smp=[101,152]`, max **57 NM**
+  - **42.1 dB** → ~2.7 crc/s, tracks 4-6, `smp=[80,181]`, max **94 NM**
+- **Conclusion:** higher gain widens the sample swing and **~doubles range** while **halving the raw frame rate**. "Best gain" is objective-dependent; since the goal is range/track coverage, the operational gain is **42.1 dB** (set, NVS-persisted). L26 **relabelled** (original crc/s sweep kept), tracker **7.9** updated.
+- **Open follow-up:** the in-page "GAIN NEAR MAXIMUM" alert still suggests dropping to **35.0 dB** — now inconsistent with the relabelled guidance (should suggest ~42 dB). Needs a `radar.html` edit + reflash; **not done** (awaiting go-ahead).
+- **Selection-set default:** corrected my own earlier claim that antenna placement explained the aircraft count — the gain change alone accounts for the 57→94 NM range shift; aircraft count also tracks live traffic and RX position, which were not held constant.
