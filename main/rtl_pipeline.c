@@ -124,6 +124,12 @@ typedef struct {
     uint32_t frame_cnt;
     uint32_t crc_ok;
     uint32_t track_count;
+    /* health snapshot (written by status task, read by status API queries) */
+    int32_t health_gain_tenth_db;
+    uint8_t health_gain_mode;
+    uint8_t health_rf;
+    int16_t health_sample_min;
+    int16_t health_sample_max;
     /* track-store lock (DSP task writes, status task expires/reads) */
     SemaphoreHandle_t track_mutex;
     TaskHandle_t dsp_handle;
@@ -529,6 +535,13 @@ static void status_task(void *arg)
                  s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10,
                  (int)s_settings.gain_mode);
 
+        /* Publish snapshot for /api/status queries */
+        s_ctx.health_rf = (uint8_t)health.rf;
+        s_ctx.health_sample_min = (int16_t)health.sample_min;
+        s_ctx.health_sample_max = (int16_t)health.sample_max;
+        s_ctx.health_gain_tenth_db = s_settings.gain_tenth_db;
+        s_ctx.health_gain_mode = (uint8_t)s_settings.gain_mode;
+
         /* Adaptive gain based on health */
         if (s_ctx.handle && s_settings.gain_mode == GAIN_MODE_ADAPTIVE) {
             adaptive_gain_step(&health);
@@ -722,13 +735,29 @@ void rtl_pipeline_get_status(rtl_pipeline_status_t *out)
     out->stream_requested = s_ctx.started_req;
     out->device_present = s_ctx.device_present;
     out->decode_ok = s_ctx.decode_ok;
+    /* Derive the coarse phase (was never set, so /api/status always said "idle"). */
+    if (!s_ctx.started_req && !s_ctx.device_present) {
+        out->phase = RTL_PIPELINE_IDLE;
+    } else if (!s_ctx.device_present) {
+        out->phase = RTL_PIPELINE_DEVICE_LOST;
+    } else if (s_ctx.started_req) {
+        out->phase = RTL_PIPELINE_STREAMING;
+    } else {
+        out->phase = RTL_PIPELINE_OPTAINING;
+    }
     out->effective_sps = s_ctx.metrics.effective_sps;
+    out->programmed_sps = s_ctx.metrics.sample_rate_sps;
     out->overrun_cnt = s_ctx.metrics.overruns;
     out->consumer_drops = s_ctx.metrics.consumer_drops;
     out->ring_free_slots = uxQueueMessagesWaiting(s_ctx.free_q);
     out->frame_cnt = s_ctx.frame_cnt;
     out->crc_ok_cnt = s_ctx.crc_ok;
     out->track_count = s_ctx.track_count;
+    out->gain_tenth_db = s_ctx.health_gain_tenth_db;
+    out->gain_mode = s_ctx.health_gain_mode;
+    out->rf_state = s_ctx.health_rf;
+    out->sample_min = s_ctx.health_sample_min;
+    out->sample_max = s_ctx.health_sample_max;
 }
 
 uint32_t rtl_pipeline_fill_aircraft(adsb_aircraft_t *out, uint32_t cap)

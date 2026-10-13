@@ -135,6 +135,8 @@ static void put_status_json(char *buf, size_t cap)
         "\"decode_ok\":%s,\"effective_sps\":\"%lu\",\"programmed_sps\":\"%lu\","
         "\"overruns\":\"%lu\",\"drops\":\"%lu\",\"ring_free\":\"%lu\","
         "\"crc_ok\":\"%lu\",\"tracks\":\"%lu\","
+        "\"gain_tenth_db\":%d,\"gain_mode\":%u,\"rf_state\":%u,"
+        "\"sample_min\":%d,\"sample_max\":%d,"
         "\"uptime_ms\":%llu,"
         "\"receiver\":{\"lat\":%.6f,\"lon\":%.6f}}",
         (unsigned long long)(esp_timer_get_time() / 1000),
@@ -143,6 +145,8 @@ static void put_status_json(char *buf, size_t cap)
         (unsigned long)st.overrun_cnt, (unsigned long)st.consumer_drops,
         (unsigned long)st.ring_free_slots,
         (unsigned long)st.crc_ok_cnt, (unsigned long)st.track_count,
+        (int)st.gain_tenth_db, (unsigned)st.gain_mode, (unsigned)st.rf_state,
+        (int)st.sample_min, (int)st.sample_max,
         (unsigned long long)(esp_timer_get_time() / 1000),
         s_receiver_lat, s_receiver_lon);
 }

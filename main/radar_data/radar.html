@@ -40,6 +40,37 @@
             padding: 10px; font-size: 13px; z-index: 100; min-width: 250px;
         }
         #settings-content { display: none; padding-top: 10px; }
+
+        /* Health / diagnostic alert banner (top-center on desktop) */
+        #alert-box {
+            position: absolute; top: 15px; left: 50%; transform: translateX(-50%);
+            z-index: 150; min-width: 260px; max-width: min(90vw, 440px); font-size: 12px;
+        }
+        #alert-box.hidden { display: none; }
+        #alert-banner {
+            display: flex; align-items: center; gap: 8px; cursor: pointer;
+            background: rgba(45, 0, 0, 0.92); border: 1px solid #ff4444; color: #ff8888;
+            padding: 8px 10px; text-shadow: 0 0 4px #ff4444;
+        }
+        #alert-box.info #alert-banner {
+            background: rgba(40, 30, 0, 0.92); border-color: #ffaa00; color: #ffcc55;
+            text-shadow: 0 0 4px #ffaa00;
+        }
+        #alert-icon { font-weight: bold; }
+        #alert-text { flex: 1; }
+        #alert-hint { opacity: 0.85; white-space: nowrap; }
+        #alert-detail {
+            background: rgba(0, 20, 0, 0.96); border: 1px solid #00ff41; border-top: none;
+            padding: 10px; color: #00ff41;
+        }
+        #alert-detail.hidden { display: none; }
+        #alert-detail .alert-desc { margin-bottom: 8px; line-height: 1.5; }
+        #alert-detail .alert-fix { color: #ffcc55; margin-bottom: 8px; line-height: 1.5; }
+        #alert-detail button {
+            width: 100%; background: #003300; border: 1px solid #00ff41; color: #00ff41;
+            font-family: 'Courier New', monospace; padding: 8px; cursor: pointer; margin-top: 4px;
+        }
+        #alert-dismiss { background: #000 !important; color: #888 !important; border-color: #444 !important; }
         
         canvas { display: block; filter: brightness(1.2); }
         
@@ -86,6 +117,8 @@
             }
             #ui-content { max-height: 40vh; max-height: 40dvh; overflow-y: auto; touch-action: pan-y; }
             #settings-content { max-height: 50vh; max-height: 50dvh; overflow-y: auto; touch-action: pan-y; }
+            #alert-box { transform: none; left: auto; }
+            #alert-detail { max-height: 40vh; max-height: 40dvh; overflow-y: auto; touch-action: pan-y; }
             input[type="number"], select { height: 28px; font-size: 14px; } 
             #tooltip.mobile-active {
                 top: auto !important; bottom: 20px !important; left: 50% !important;
@@ -135,6 +168,21 @@
     </div>
     <div id="status">Waiting for sweep...</div>
     <div id="user-location">User GPS: Fetching...</div>
+</div>
+
+<!-- Health / diagnostic alert banner -->
+<div id="alert-box" class="hidden">
+    <div id="alert-banner" onclick="toggleAlertDetail()">
+        <span id="alert-icon">!</span>
+        <span id="alert-text">Diagnostic alert</span>
+        <span id="alert-hint">[fix &#9662;]</span>
+    </div>
+    <div id="alert-detail" class="hidden">
+        <div class="alert-desc" id="alert-desc"></div>
+        <div class="alert-fix" id="alert-fix"></div>
+        <button id="alert-apply">Apply recommended change</button>
+        <button id="alert-dismiss">Dismiss</button>
+    </div>
 </div>
 
 <!-- Settings Panel -->
@@ -864,6 +912,176 @@
 
 loadSettings();
 loadLocation();
+
+// --- Health diagnostics / alert banner ---
+// Polls /api/status, decides whether the receiver needs attention, and offers
+// a one-click settings change. RF health enum: 1=OK 2=USB_STARVING
+// 3=APP_TOO_SLOW 4=CLIPPING 5=WEAK (0=unknown).
+const alertBox = document.getElementById("alert-box");
+const alertText = document.getElementById("alert-text");
+const alertIcon = document.getElementById("alert-icon");
+const alertDetail = document.getElementById("alert-detail");
+const alertDesc = document.getElementById("alert-desc");
+const alertFix = document.getElementById("alert-fix");
+const alertApplyBtn = document.getElementById("alert-apply");
+const alertDismissBtn = document.getElementById("alert-dismiss");
+
+const SEV_RANK = { error: 0, warn: 1, info: 2 };
+let lastStatus = null;
+let currentAlert = null;
+let alertDetailOpen = false;
+let alertDismissedKey = null;
+let ringWindow = [];
+
+function tenthsToDb(v) { return (v / 10).toFixed(1); }
+
+function evaluateAlerts(s) {
+    const alerts = [];
+    const rate = parseInt(s.programmed_sps || s.effective_sps || 0, 10);
+    const gain = (typeof s.gain_tenth_db === "number") ? s.gain_tenth_db : null;
+    const overruns = parseInt(s.overruns, 10) || 0;
+    const drops = parseInt(s.drops, 10) || 0;
+    const streaming = (s.phase === "streaming") && s.device_present;
+
+    if (s.rf_state === 4) {
+        const t = gain != null ? Math.max(0, gain - 30) : 350;
+        alerts.push({ key: "clip", icon: "!", title: "RF OVERLOAD (clipping)",
+            desc: "The tuner is saturating the ADC. Near full-scale samples raise the noise floor and can mask weak frames from distant aircraft.",
+            fix: { gain: t, gain_mode: 0 },
+            fixText: "Lower gain to " + tenthsToDb(t) + " dB" + (gain != null ? " (now " + tenthsToDb(gain) + " dB)" : "") + "." });
+    }
+    if (s.rf_state === 5) {
+        const t = gain != null ? Math.min(496, gain + 30) : 421;
+        alerts.push({ key: "weak", icon: "!", title: "RF WEAK",
+            desc: "Very low sample swing — the signal is too weak. Distant frames are not reaching the decoder.",
+            fix: { gain: t, gain_mode: 0 },
+            fixText: "Raise gain to " + tenthsToDb(t) + " dB" + (gain != null ? " (now " + tenthsToDb(gain) + " dB)" : "") + "." });
+    }
+    if (streaming && overruns > 0) {
+        alerts.push({ key: "usb", icon: "!", title: "USB OVERRUN",
+            desc: "The USB link cannot sustain the streamed rate; samples are lost before they reach the decoder.",
+            fix: rate > 2048000 ? { sample_rate_sps: 2048000 } : null,
+            fixText: rate > 2048000 ? "Drop the sample rate to 2048000 SPS."
+                                    : "Rate is already at the lowest option — this points to a USB host/hub problem." });
+    }
+    if (streaming && drops > 0) {
+        let fix = null, txt;
+        if (rate > 2048000) { fix = { sample_rate_sps: 2048000 }; txt = "Drop the sample rate to 2048000 SPS."; }
+        else if (gain != null) { fix = { gain: Math.max(0, gain - 30), gain_mode: 0 }; txt = "Lower gain by 3 dB to cut false preambles and free up decode time."; }
+        else { txt = "The decoder cannot keep up at this rate."; }
+        alerts.push({ key: "drops", icon: "!", title: "DECODER OVERLOAD (frames dropped)",
+            desc: "The IQ ring is overflowing because the decoder cannot keep up, so whole blocks of samples are being discarded.",
+            fix: fix, fixText: txt });
+    }
+    if (streaming && drops === 0 && overruns === 0 && ringWindow.filter(Boolean).length >= 5) {
+        const fix = gain != null ? { gain: Math.max(0, gain - 30), gain_mode: 0 } : null;
+        alerts.push({ key: "ring", icon: "i", severity: "info", title: "IQ BUFFER RUNNING HOT",
+            desc: "The IQ ring has been full in " + ringWindow.filter(Boolean).length + " of the last " + ringWindow.length +
+                  " checks. Nothing is dropped yet, but the decoder is right at its limit and a busier sky could tip it over.",
+            fix: fix,
+            fixText: "Optionally lower gain by 3 dB to reduce the decode workload." });
+    }
+    if ((s.rf_state === 1 || s.rf_state === 0) && gain != null && gain >= 470) {
+        alerts.push({ key: "highgain", icon: "!", severity: "warn", title: "GAIN NEAR MAXIMUM",
+            desc: "Gain is at the top of the ladder. Bench measurements show ~42 dB gives the best range; pushing to the very top usually raises the noise floor and lowers the valid-frame rate without adding aircraft.",
+            fix: { gain: 421, gain_mode: 0 },
+            fixText: "Set gain to 42.1 dB (~best range; less noise than maximum)." });
+    }
+    return alerts;
+}
+
+function renderAlert() {
+    const list = evaluateAlerts(lastStatus || {});
+    list.sort((a, b) => SEV_RANK[a.severity || "error"] - SEV_RANK[b.severity || "error"]);
+    const top = list[0];
+    if (!top || alertDismissedKey === top.key) {
+        alertBox.classList.add("hidden");
+        currentAlert = null;
+        return;
+    }
+    currentAlert = top;
+    alertText.textContent = top.title + (list.length > 1 ? " (+" + (list.length - 1) + ")" : "");
+    alertIcon.textContent = top.icon;
+    alertBox.classList.toggle("info", (top.severity || "error") === "info");
+    alertBox.classList.remove("hidden");
+    if (alertDetailOpen) fillAlertDetail();
+}
+
+function fillAlertDetail() {
+    if (!currentAlert) return;
+    alertDesc.textContent = currentAlert.desc;
+    alertFix.textContent = currentAlert.fixText || "";
+    alertApplyBtn.style.display = currentAlert.fix ? "block" : "none";
+}
+
+window.toggleAlertDetail = function () {
+    alertDetailOpen = !alertDetailOpen;
+    alertDetail.classList.toggle("hidden", !alertDetailOpen);
+    if (alertDetailOpen) fillAlertDetail();
+};
+
+function dismissAlert() {
+    if (currentAlert) alertDismissedKey = currentAlert.key;
+    alertDetailOpen = false;
+    alertDetail.classList.add("hidden");
+    renderAlert();
+}
+
+async function applyAlertFix() {
+    if (!currentAlert || !currentAlert.fix) return;
+    const body = {
+        gain: parseInt(settingsForm.gain.value),
+        dc_filter: settingsForm.dcFilter.checked,
+        gain_mode: parseInt(settingsForm.gainMode.value, 10),
+        adaptive_gain: parseInt(settingsForm.gainMode.value, 10) === 1,
+        aggressive: settingsForm.aggressive.checked,
+        crc_fix: settingsForm.crcFix.checked,
+        sample_rate_sps: parseInt(settingsForm.sampleRate.value)
+    };
+    Object.assign(body, currentAlert.fix);
+    if (currentAlert.fix.gain_mode !== undefined) {
+        body.gain_mode = currentAlert.fix.gain_mode;
+        body.adaptive_gain = currentAlert.fix.gain_mode === 1;
+    }
+    // Reflect the intended change in the settings form so it is visible.
+    settingsForm.gain.value = body.gain;
+    settingsForm.gainMode.value = String(body.gain_mode);
+    settingsForm.sampleRate.value = String(body.sample_rate_sps);
+    try {
+        const r = await fetch("/api/settings", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+        });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        await r.json();
+        alertDismissedKey = null;
+        alertDetailOpen = false;
+        alertDetail.classList.add("hidden");
+        loadSettings();
+        setTimeout(pollHealth, 2500);
+    } catch (err) {
+        alertFix.textContent = "Failed to apply: " + err.message;
+    }
+}
+
+function pollHealth() {
+    fetch("/api/status")
+        .then(r => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)))
+        .then(s => {
+            lastStatus = s;
+            const free = parseInt(s.ring_free, 10) || 0;
+            ringWindow.push(free === 0 ? 1 : 0);
+            if (ringWindow.length > 10) ringWindow.shift();
+            renderAlert();
+        })
+        .catch(() => { /* keep last known state */ });
+}
+
+alertApplyBtn.addEventListener("click", (e) => { e.stopPropagation(); applyAlertFix(); });
+alertDismissBtn.addEventListener("click", (e) => { e.stopPropagation(); dismissAlert(); });
+pollHealth();
+setInterval(pollHealth, 3000);
 </script>
 </body>
 </html>

@@ -229,3 +229,11 @@ Almost every wrong turn above traces to **not verifying reality before acting**:
 - **Live state after tuning:** 2048000 sps, **35.0 dB manual**, `dc_filter`/`aggressive`/`crc_fix` ON, persisted to NVS. Observed 11-14 tracks concurrently (user reported up to ~19 at one point), max decoded range ~47 NM, `rf=OK`, `over=0 drops=0`.
 - **Rule:** "More gain" is not monotonic for a noise-limited receiver — find the knee. Don't let a factory default encode the worst point on the curve.
 
+## L27. `/api/status` reported `phase:"idle"` and `programmed_sps:"0"` forever
+
+- **Symptom:** While building a UI that gates alerts on `phase === "streaming"`, the raw `GET /api/status` showed `"phase":"idle"` and `"programmed_sps":"0"` even while the device was streaming at 2.048 MSPS with tracks on screen. The HUD's `RX:` field also always read `idle`.
+- **Root cause:** `rtl_pipeline_get_status()` (`rtl_pipeline.c`) never assigned `out->phase` nor `out->programmed_sps`, so the `memset(out,0,…)` left `phase = RTL_PIPELINE_IDLE (0)` and `programmed_sps = 0`. The `RTL_PIPELINE_{OPTAINING,STREAMING,DEVICE_LOST,DEFUNCT}` enum and the `phase`→string switch in `http_radar.c` were effectively dead code — nothing ever populated the field.
+- **Fix:** derive phase in `get_status()` from the real flags (`device_present`/`started_req`): idle → obtaining → streaming → device-lost; and set `programmed_sps = s_ctx.metrics.sample_rate_sps`.
+- **Why it mattered:** any consumer that trusted `phase` silently mis-classified a healthy, streaming receiver as idle — e.g. it would have suppressed every "streaming-only" diagnostic warning.
+- **Rule:** an enum + formatter that is never fed inputs is a latent trap. When adding a field to a status struct, grep for where it is *written*, not just where the struct type is declared — a zero-filled struct happily serialises as a plausible-looking default.
+
