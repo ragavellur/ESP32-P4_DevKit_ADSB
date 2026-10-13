@@ -510,20 +510,28 @@ static void status_task(void *arg)
         s_ctx.frame_cnt = frames_now;
         s_ctx.crc_ok = crc_now;
 
+        esp_rtl_sdr_health_info_t health;
+        memset(&health, 0, sizeof(health));
+        if (s_ctx.handle) {
+            (void)esp_rtl_sdr_get_health(s_ctx.handle, &health);
+        }
+
         ESP_LOGI(STATUS_TAG, "sps=%u eff=%u over=%u drops=%u | decoder: pre=%u "
-                 "frm=%u(+%u/s) df17=%u crc=%u(+%u/s) mag=[%u,%u]",
+                 "frm=%u(+%u/s) df17=%u crc=%u(+%u/s) mag=[%u,%u] | rf=%d "
+                 "smp=[%d,%d] gain=%d.%d mode=%d",
                  m.sample_rate_sps, m.effective_sps, m.overruns,
                  m.consumer_drops,
                  ds.decoder_preambles, frames_now, frames_now - last_frames,
                  ds.decoder_df17, crc_now, crc_now - last_crc,
-                 ds.decoder_magnitude_min, ds.decoder_magnitude_max);
+                 ds.decoder_magnitude_min, ds.decoder_magnitude_max,
+                 (int)health.rf, (int)health.sample_min,
+                 (int)health.sample_max,
+                 s_settings.gain_tenth_db / 10, s_settings.gain_tenth_db % 10,
+                 (int)s_settings.gain_mode);
 
         /* Adaptive gain based on health */
         if (s_ctx.handle && s_settings.gain_mode == GAIN_MODE_ADAPTIVE) {
-            esp_rtl_sdr_health_info_t health;
-            if (esp_rtl_sdr_get_health(s_ctx.handle, &health) == ESP_OK) {
-                adaptive_gain_step(&health);
-            }
+            adaptive_gain_step(&health);
         } else if (s_settings.gain_mode == GAIN_MODE_MANUAL) {
             /* Apply manual gain changes from web API */
             static int last_applied_gain = -1;
@@ -692,7 +700,9 @@ esp_err_t rtl_pipeline_init(void)
     if (ok != pdPASS) {
         return ESP_FAIL;
     }
-    ok = xTaskCreatePinnedToCore(status_task, "rtl_stat", 2048, NULL, 3, NULL, 1);
+    /* Status/adaptive-gain runs on core 0: adsb_dsp (prio 6) saturates core 1
+     * and would starve this lower-priority task, freezing gain changes. */
+    ok = xTaskCreatePinnedToCore(status_task, "rtl_stat", 3072, NULL, 4, NULL, 0);
     if (ok != pdPASS) {
         return ESP_FAIL;
     }
@@ -701,7 +711,7 @@ esp_err_t rtl_pipeline_init(void)
     if (ok != pdPASS) {
         return ESP_FAIL;
     }
-    ESP_LOGI(PIPELINE_TAG, "tasks started (rtl_driver=core1, adsb_dsp=core1, rtl_stat=core1)");
+    ESP_LOGI(PIPELINE_TAG, "tasks started (rtl_driver=core1, adsb_dsp=core1, rtl_stat=core0)");
     return ESP_OK;
 }
 

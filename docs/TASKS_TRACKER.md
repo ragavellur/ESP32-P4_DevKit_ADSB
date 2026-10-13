@@ -121,6 +121,7 @@ Phase 4 verified by host unit test `tests/host/test_adsb_state.c` (pace, pairing
 | 6.8 | Responsive mobile layout: `#ui` + Settings panels stacked (no overlap) | Complete — `#hud-stack` flex column on ≤768px / ≤520px height; desktop unchanged; browser-measured. Device visual check pending |
 | 6.9 | Receiver lat/lon from web UI (browser geolocation or manual entry, NVS-persisted) | Complete — `/api/location` GET/POST; Settings panel lat/lon + Use Browser Location + Apply; immediate re-center. Device visual check pending |
 | 6.12 | Honest HUD status (`ACFT` / `ON SCREEN` / `NO POS`) + dynamic title `Raga Radar (<nearest major city>)` | Complete — status now splits raw tracks vs plotted blips vs no-position; title uses offline ~75-city Haversine table (fallback lat/lon >150 km). Verified via mock-server browser test + `idf.py build`. LEARNING L19, L20 |
+| 6.13 | Fix settings (`/api/settings` POST) parser + 2.4 MSPS decode + redundant Adaptive Gain control | Complete — value-bounded JSON extraction (L21); 2.4 MSPS `bit_spacing`/`half_bit_spacing` 1200/600 → 2400/1200 (L22); removed duplicate Adaptive Gain checkbox (Gain Mode is authoritative). Verified HTML parse + `node --check` + `idf.py build`. LEARNING L21, L22 |
 
 ## Phase 7 — Core optimization & validation
 
@@ -132,6 +133,11 @@ Phase 4 verified by host unit test `tests/host/test_adsb_state.c` (pace, pairing
 | 7.4 | Validate live ADS-B: frames/sec, track lifecycle, CPR positions stable | Not Started |
 | 7.5 | Validate radar amplitude/trails/sweep/tooltips parity with reference `radar.html` | Not Started |
 | 7.6 | Validate Ethernet route lookup (FROM/TO) when cabled | Not Started |
+| 7.7 | Fix decoder dropping ~half of each 64 KiB IQ block (`kMagnitudeCapacity` 16640 < 32768 pairs) | Complete — chunked `process_cu8`/`process_pairs`; crc ≈2× (L23) |
+| 7.8 | Fix status/adaptive-gain starvation + WDT flood (all tasks on core 1) | Complete — `rtl_stat` → core 0; disable idle-CPU1 WDT (L24) |
+| 7.9 | Characterize tuner gain vs decode rate | Complete — optimal ≈35 dB; 40/49.6 dB worse; factory default 496 is worst (L26) |
+| 7.10 | 2.4 MSPS decode path | **Blocked** — preamble detection fails at 2.4 (~5/s vs ~45/s); L22 fix was insufficient (L25). Keep 2048 |
+| 7.11 | Sanity-check `/api/settings` "defaults" (gain 496 / filters off) | Open — footgun for "Reset to Defaults" (L26) |
 
 ---
 
@@ -146,3 +152,5 @@ Phase 4 verified by host unit test `tests/host/test_adsb_state.c` (pace, pairing
 | 2026-10-12 | Phase 6.10: fix "Raga Radar - Pune" panel not fully collapsing — `#status`/`#user-location` were outside `#ui-content`. New `applyMenuState()` toggles all three; verified initial/expanded/collapsed at desktop + mobile. LEARNING L17. |
 | 2026-10-12 | Phase 6.11: fix route lookup — `api.adsb.lol/api/0/routeset` sends no CORS headers (browser `Failed to fetch`). Switched to `api.adsbdb.com/v0/callsign/<cs>` (GET, `ACAO: *`), mapped `flightroute` into the existing tooltip shape; per-callsign GET with cache/dedupe + 8 s timeout. Verified in-browser (IGO123 → VIDP-VILH / DEL-IXL) + not-found path + `idf.py build`. LEARNING L18. |
 | 2026-10-13 | Phase 6.12: HUD honesty + dynamic title. Status line now `ACFT (raw tracks) / ON SCREEN (plotted blips) / NO POS (no lat-lon)`; replaced the misleading raw-count `ACFT`. Title changed from hardcoded "Raga Radar - Pune" to `Raga Radar (<nearest major city>)` via an offline ~75-city Haversine table (fallback `lat, lon` if >150 km). Verified via mock-server browser test (Hyderabad/Pune/remote) + HTML parse + `node --check` + `idf.py build` (56% free). LEARNING L19, L20. Build-only — device not flashed (offline). |
+| 2026-10-13 | Phase 6.13: settings/decode fixes. `/api/settings` POST used `strstr(p,"true"/"false")` which scanned the whole remaining body → `false` fields followed by a `true` field were misread (L21); replaced with value-bounded `json_get_value()`. 2.4 MSPS `bit_spacing`/`half_bit_spacing` were half the correct milli-sample values (1200/600) → 0 frames; fixed to 2400/1200 (L22). Removed the vestigial duplicate "Adaptive Gain" checkbox (Gain Mode drives `adaptive_gain_step`, `rtl_pipeline.c:280`). Verified HTML parse (33 unique ids, 0 dup) + `node --check` + concat + `idf.py build` (56% free). Build-only — device not flashed (offline). |
+| 2026-10-13 | Phase 7.7-7.10: live decode diagnosis on hardware (USB serial + web UI at 192.168.1.39). **7.7:** decoder dropped ~half of every 64 KiB IQ block (`kMagnitudeCapacity`=16640 vs 32768 pairs) → chunked `process_cu8`/`process_pairs`; crc ≈2× (L23). **7.8:** `rtl_stat` was starved on core 1 by the prio-6 `adsb_dsp` (gain/status never ran; IDLE1 WDT flood) → moved to core 0, disabled idle-CPU1 WDT (L24). **7.9:** manual-gain sweep (crc/s over 15 s windows) → **35.0 dB optimal**, 40/49.6 dB worse; factory default 496 is the worst tested config (L26). **7.10:** 2.4 MSPS still ~0 — preamble detection fails (~5/s vs ~45/s); L22 was insufficient (L25). Final live config: 2048000 sps, 35.0 dB manual, dc_filter/aggressive/crc_fix ON (NVS-persisted); 11-14 tracks concurrently (user saw ~19), ~47 NM max, `rf=OK`, `over=0 drops=0`. |
