@@ -100,7 +100,7 @@
 <div id="hud-stack">
 <div id="ui">
     <div id="ui-header" onclick="toggleMenu()">
-        <span>Raga Radar - Pune</span>
+        <span id="ui-title">Raga Radar</span>
         <span id="toggleBtn">[-]</span>
     </div>
     <div id="ui-content">
@@ -248,6 +248,77 @@
     let receiverLat = 18.480718;   // fallback: Pune
     let receiverLon = 73.898235;
 
+    // Major Indian cities (approx. centroids) for labeling the receiver location.
+    // This is intentionally offline (no geocoding API) so the title works without internet.
+    const MAJOR_CITIES = [
+        { n: 'Mumbai', lat: 19.0760, lon: 72.8777 }, { n: 'Delhi', lat: 28.6139, lon: 77.2090 },
+        { n: 'Bengaluru', lat: 12.9716, lon: 77.5946 }, { n: 'Hyderabad', lat: 17.3850, lon: 78.4867 },
+        { n: 'Ahmedabad', lat: 23.0225, lon: 72.5714 }, { n: 'Chennai', lat: 13.0827, lon: 80.2707 },
+        { n: 'Kolkata', lat: 22.5726, lon: 88.3639 }, { n: 'Pune', lat: 18.5204, lon: 73.8567 },
+        { n: 'Jaipur', lat: 26.9124, lon: 75.7873 }, { n: 'Surat', lat: 21.1702, lon: 72.8311 },
+        { n: 'Lucknow', lat: 26.8467, lon: 80.9462 }, { n: 'Kanpur', lat: 26.4499, lon: 80.3319 },
+        { n: 'Nagpur', lat: 21.1458, lon: 79.0882 }, { n: 'Indore', lat: 22.7196, lon: 75.8577 },
+        { n: 'Bhopal', lat: 23.2599, lon: 77.4126 }, { n: 'Visakhapatnam', lat: 17.6868, lon: 83.2185 },
+        { n: 'Patna', lat: 25.5941, lon: 85.1376 }, { n: 'Vadodara', lat: 22.3072, lon: 73.1812 },
+        { n: 'Ludhiana', lat: 30.9010, lon: 75.8573 }, { n: 'Agra', lat: 27.1767, lon: 78.0081 },
+        { n: 'Nashik', lat: 19.9975, lon: 73.7898 }, { n: 'Varanasi', lat: 25.3176, lon: 82.9739 },
+        { n: 'Srinagar', lat: 34.0837, lon: 74.7973 }, { n: 'Amritsar', lat: 31.6340, lon: 74.8723 },
+        { n: 'Prayagraj', lat: 25.4358, lon: 81.8463 }, { n: 'Ranchi', lat: 23.3441, lon: 85.3096 },
+        { n: 'Coimbatore', lat: 11.0168, lon: 76.9558 }, { n: 'Jabalpur', lat: 23.1815, lon: 79.9864 },
+        { n: 'Gwalior', lat: 26.2183, lon: 78.1828 }, { n: 'Vijayawada', lat: 16.5062, lon: 80.6480 },
+        { n: 'Jodhpur', lat: 26.2389, lon: 73.0243 }, { n: 'Madurai', lat: 9.9252, lon: 78.1198 },
+        { n: 'Raipur', lat: 21.2514, lon: 81.6296 }, { n: 'Guwahati', lat: 26.1445, lon: 91.7362 },
+        { n: 'Chandigarh', lat: 30.7333, lon: 76.7794 }, { n: 'Mysuru', lat: 12.2958, lon: 76.6394 },
+        { n: 'Thiruvananthapuram', lat: 8.5241, lon: 76.9366 }, { n: 'Kochi', lat: 9.9312, lon: 76.2673 },
+        { n: 'Bhubaneswar', lat: 20.2961, lon: 85.8245 }, { n: 'Dehradun', lat: 30.3165, lon: 78.0322 },
+        { n: 'Jammu', lat: 32.7266, lon: 74.8570 }, { n: 'Shimla', lat: 31.1048, lon: 77.1734 },
+        { n: 'Panaji', lat: 15.4909, lon: 73.8278 }, { n: 'Mangaluru', lat: 12.9141, lon: 74.8560 },
+        { n: 'Aurangabad', lat: 19.8762, lon: 75.3433 }, { n: 'Kolhapur', lat: 16.7050, lon: 74.2433 },
+        { n: 'Warangal', lat: 17.9689, lon: 79.5941 }, { n: 'Nizamabad', lat: 18.6725, lon: 78.0941 },
+        { n: 'Tirupati', lat: 13.6288, lon: 79.4192 }, { n: 'Kurnool', lat: 15.8281, lon: 78.0373 },
+        { n: 'Guntur', lat: 16.3067, lon: 80.4365 }, { n: 'Nellore', lat: 14.4426, lon: 79.9865 },
+        { n: 'Belagavi', lat: 15.8497, lon: 74.4977 }, { n: 'Hubballi', lat: 15.3647, lon: 75.1240 },
+        { n: 'Davangere', lat: 14.4644, lon: 75.9218 }, { n: 'Ballari', lat: 15.1394, lon: 76.9214 },
+        { n: 'Thrissur', lat: 10.5276, lon: 76.2144 }, { n: 'Kozhikode', lat: 11.2588, lon: 75.7804 },
+        { n: 'Salem', lat: 11.6643, lon: 78.1460 }, { n: 'Tiruchirappalli', lat: 10.7905, lon: 78.7047 },
+        { n: 'Tiruppur', lat: 11.1085, lon: 77.3411 }, { n: 'Erode', lat: 11.3410, lon: 77.7172 },
+        { n: 'Vellore', lat: 12.9165, lon: 79.1325 }, { n: 'Puducherry', lat: 11.9416, lon: 79.8083 },
+        { n: 'Rajkot', lat: 22.3039, lon: 70.8022 }, { n: 'Bhavnagar', lat: 21.7645, lon: 72.1519 },
+        { n: 'Jamnagar', lat: 22.4707, lon: 70.0577 }, { n: 'Meerut', lat: 28.9845, lon: 77.7064 },
+        { n: 'Ghaziabad', lat: 28.6692, lon: 77.4538 }, { n: 'Noida', lat: 28.5355, lon: 77.3910 },
+        { n: 'Moradabad', lat: 28.8386, lon: 78.7733 }, { n: 'Gorakhpur', lat: 26.7606, lon: 83.3732 },
+        { n: 'Bareilly', lat: 28.3670, lon: 79.4304 }
+    ];
+    const CITY_MATCH_KM = 150;   // beyond this, label with raw lat/lon
+
+    function haversineKm(lat1, lon1, lat2, lon2) {
+        const R = 6371;
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLon = (lon2 - lon1) * Math.PI / 180;
+        const a = Math.sin(dLat / 2) ** 2 +
+                  Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                  Math.sin(dLon / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(a));
+    }
+
+    function nearestCity(lat, lon) {
+        let best = null, bestKm = Infinity;
+        for (const c of MAJOR_CITIES) {
+            const d = haversineKm(lat, lon, c.lat, c.lon);
+            if (d < bestKm) { bestKm = d; best = c; }
+        }
+        return { city: best, km: bestKm };
+    }
+
+    function updateTitle() {
+        const el = document.getElementById('ui-title');
+        if (!el) return;
+        const { city, km } = nearestCity(receiverLat, receiverLon);
+        if (city && km <= CITY_MATCH_KM) el.textContent = `Raga Radar (${city.n})`;
+        else el.textContent = `Raga Radar (${receiverLat.toFixed(2)}, ${receiverLon.toFixed(2)})`;
+    }
+    updateTitle();
+
     async function loadReceiver() {
         try {
             const r = await fetch('/api/status');
@@ -264,6 +335,7 @@
         } catch (err) {
             // keep fallback center; the page still works offline
         }
+        updateTitle();
     }
 
     let userLat = null, userLon = null;
@@ -384,8 +456,10 @@
             latestApiData = data.aircraft || []; 
             
             syncRoutesToMemory(latestApiData);
-            const activeCacheCount = Object.keys(routeMemory).length;
-            statusDiv.innerHTML = `SYNCED | ACFT: ${latestApiData.length} | CACHED RTE: ${activeCacheCount}<br>RADAR REF: ${receiverLat.toFixed(4)}, ${receiverLon.toFixed(4)}`;
+            const acftTotal = latestApiData.length;
+            const acftNoPos = latestApiData.filter(a => !a.lat || !a.lon).length;
+            const onScreen = radarTargets.size;
+            statusDiv.innerHTML = `SYNCED | ACFT: ${acftTotal} | ON SCREEN: ${onScreen} | NO POS: ${acftNoPos}<br>RADAR REF: ${receiverLat.toFixed(4)}, ${receiverLon.toFixed(4)}`;
         } catch (err) {
             statusDiv.innerHTML = `<span style="color:red">SYNC ERR: ${err.message}</span>`;
         }
@@ -775,6 +849,7 @@
             // Re-center the radar immediately with the new reference.
             receiverLat = s.lat;
             receiverLon = s.lon;
+            if (typeof updateTitle === "function") updateTitle();
             if (typeof loadReceiver === "function") loadReceiver();
             setLocStatus("Location applied.", true);
         } catch (err) {

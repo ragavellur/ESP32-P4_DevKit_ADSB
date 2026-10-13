@@ -159,3 +159,19 @@ Almost every wrong turn above traces to **not verifying reality before acting**:
 - not matching API response format to dropdown option values (L11).
 
 **The discipline: READ FIRST, VERIFY, THEN EDIT. Every tool answer is data. Interpret the data before changing code.**
+---
+
+## L19. "ACFT" counted raw tracks, not plotted blips
+
+- **Symptom:** The HUD read `ACFT: 5` (or more) while only 2 dots were visible on the radar; the user reasonably read this as "the decoder is missing flights".
+- **Root cause:** The status line used `latestApiData.length` — the length of the raw `/data/aircraft.json` array. That array includes every *track* the decoder currently holds, including ones with no decoded position (Mode-S-only / CPR not yet resolved). The radar only draws an aircraft that passes `if (!ac.lat || !ac.lon) return;`, then the altitude band, the range ring, and finally the sweep-crossed check. So `ACFT` was never the on-screen count.
+- **Fix:** Status line now reports three honest numbers: `ACFT: <raw tracks> | ON SCREEN: <radarTargets.size> | NO POS: <tracks without lat/lon>`.
+- **Rule:** A label must name what it actually measures. When a count that "looks like N" is derived from a raw feed, separate the raw total from the filtered/rendered subset, or you will chase phantom decoder bugs.
+
+---
+
+## L20. Reverse-geocoding for the title: use an offline city table, not an API
+
+- **Context:** The HUD title was a hardcoded "Raga Radar - Pune" and did not follow the configured receiver location.
+- **Decision:** Label the location with the **nearest major city from an embedded table** (Haversine over ~75 Indian city centroids) and fall back to `lat, lon` when nothing is within 150 km. This keeps the title working with **no internet** and avoids another CORS/rate-limit dependency (cf. L18).
+- **Rule:** For a small, bounded, latency-free lookup (labeling a location), prefer a bundled table over a network geocoder. Reserve external APIs for data that genuinely cannot be embedded.
