@@ -219,13 +219,31 @@ Almost every wrong turn above traces to **not verifying reality before acting**:
 - **Status:** **2.4 MSPS is not a supported path.** Keep the default 2048000. A real fix needs the 2.4 preamble constants re-derived (quiet window in the guard, pulse-peak indices) and verified on live traffic.
 - **Rule:** A fix is not proven until the real signal path exercises it. Mark partially-verified branches explicitly rather than declaring them done.
 
-## L26. Gain: lower won; the factory "default" is the worst point on the curve
+## L26. Gain is objective-dependent: 35 dB maximises frame rate, ~42 dB maximises range
+
+> **Relabelled 2026-10-13** — the original conclusion below optimised **crc/s only**, which hid a large range trade-off. Since the goal is range/track coverage (not raw frame throughput), the operational gain is **≈42.1 dB**. Original sweep data retained.
 
 - **Method:** With the fixed pipeline, two back-to-back manual-gain sweeps measured crc/s over ~15-16 s windows (traffic drifts slowly, so adjacent windows are comparable):
   - Sweep 1 (desc): 496→4.57, 450→3.91, 400→5.91, **350→7.49**, 300→5.74 crc/s
   - Sweep 2 (asc): 300→3.37, 325→3.24, **350→4.80**, 375→4.22, 400→2.68 crc/s
-- **Result:** **≈350 tenths-dB (35.0 dB) is the best manual gain.** 40 dB (the value the NVS happened to hold) and 49.6 dB were clearly worse. At 49.6 dB `pre` rose to ~+80/s (more noise preambles) while crc *fell* — extra front-end gain lifted the noise floor faster than the signal.
+- **Frame-rate view:** **≈350 tenths-dB (35.0 dB) gave the highest crc/s.** 40 dB and 49.6 dB were clearly worse on that metric. At 49.6 dB `pre` rose to ~+80/s (more noise preambles) while crc *fell* — extra front-end gain lifted the noise floor faster than the signal.
+- **Correction (2026-10-13) — crc/s was the wrong sole metric.** Re-measured on the live device (2048 kSPS, dc_filter/aggressive/crc_fix ON), holding everything but gain constant:
+
+  | gain | crc/s | tracks | sample swing | max decoded range |
+  |---|---|---|---|---|
+  | 35.0 dB | ~5.5 | 3-5 | `smp=[101,152]` | 57 NM |
+  | **42.1 dB** | ~2.7 | 4-6 | `smp=[80,181]` | **94 NM** |
+
+  Higher gain widens the sample swing and **nearly doubles range** (57 → 94 NM) and gives more positioned tracks, while **halving the raw frame rate** (more noise preambles → more CRC rejects). "Best gain" therefore depends on the objective: ~35 dB for maximum frame throughput, **~42 dB for maximum range/reach**. Operational choice is **42.1 dB**.
 - **Footgun (open item):** `GET /api/settings` reports `defaults{ gain:496, dc_filter:false, aggressive:false, crc_fix:false }` (`http_radar.c:258-264`) — **"Reset to Defaults" selects the worst-tested configuration** (max gain, all filters off). Not changed; noted for follow-up.
-- **Live state after tuning:** 2048000 sps, **35.0 dB manual**, `dc_filter`/`aggressive`/`crc_fix` ON, persisted to NVS. Observed 11-14 tracks concurrently (user reported up to ~19 at one point), max decoded range ~47 NM, `rf=OK`, `over=0 drops=0`.
-- **Rule:** "More gain" is not monotonic for a noise-limited receiver — find the knee. Don't let a factory default encode the worst point on the curve.
+- **Live state after tuning:** 2048000 sps, **42.1 dB manual** (chosen for range), `dc_filter`/`aggressive`/`crc_fix` ON, persisted to NVS. `rf=OK`, `over=0 drops=0`, `eff≈2.045 MSPS` (99.9%).
+- **Rule:** For a noise-limited receiver, gain is an *objective-dependent* trade-off, not a single optimum. Benchmark against the metric you actually care about (here: range/track coverage), not the one that is easiest to log (frames/s).
+
+## L27. `/api/status` reported `phase:"idle"` and `programmed_sps:"0"` forever
+
+- **Symptom:** While building a UI that gates alerts on `phase === "streaming"`, the raw `GET /api/status` showed `"phase":"idle"` and `"programmed_sps":"0"` even while the device was streaming at 2.048 MSPS with tracks on screen. The HUD's `RX:` field also always read `idle`.
+- **Root cause:** `rtl_pipeline_get_status()` (`rtl_pipeline.c`) never assigned `out->phase` nor `out->programmed_sps`, so the `memset(out,0,…)` left `phase = RTL_PIPELINE_IDLE (0)` and `programmed_sps = 0`. The `RTL_PIPELINE_{OPTAINING,STREAMING,DEVICE_LOST,DEFUNCT}` enum and the `phase`→string switch in `http_radar.c` were effectively dead code — nothing ever populated the field.
+- **Fix:** derive phase in `get_status()` from the real flags (`device_present`/`started_req`): idle → obtaining → streaming → device-lost; and set `programmed_sps = s_ctx.metrics.sample_rate_sps`.
+- **Why it mattered:** any consumer that trusted `phase` silently mis-classified a healthy, streaming receiver as idle — e.g. it would have suppressed every "streaming-only" diagnostic warning.
+- **Rule:** an enum + formatter that is never fed inputs is a latent trap. When adding a field to a status struct, grep for where it is *written*, not just where the struct type is declared — a zero-filled struct happily serialises as a plausible-looking default.
 

@@ -53,6 +53,11 @@ typedef struct {
     uint32_t frame_cnt;              /**< decoder frames seen (cumulative) */
     uint32_t crc_ok_cnt;             /**< decoder frames with valid CRC */
     uint32_t track_count;            /**< live aircraft tracks (1 Hz refresh) */
+    int32_t  gain_tenth_db;          /**< applied manual gain, tenths of dB */
+    uint8_t  gain_mode;              /**< 0 = manual, 1 = adaptive */
+    uint8_t  rf_state;               /**< ESP_RTL_SDR_HEALTH_RF_* value */
+    int16_t  sample_min;             /**< recent RF min sample (health) */
+    int16_t  sample_max;             /**< recent RF max sample (health) */
 } rtl_pipeline_status_t;
 
 /* Spawn pipeline tasks and kick off bring-up. Usually called once from
