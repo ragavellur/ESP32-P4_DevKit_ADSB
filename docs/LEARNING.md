@@ -129,6 +129,15 @@ Each entry: symptom → root cause → fix → the rule to follow forever.
 
 ---
 
+## L17. Collapsing a HUD panel left `#status` / `#user-location` stranded on screen
+
+- **Symptom:** "Raga Radar - Pune" panel would not "fully collapse" — after tapping the header, the controls hid but the `SYNC ERR: Failed to fetch` and `User GPS: …` lines stayed visible, making the panel look un-collapsed (reported on mobile).
+- **Root cause:** `toggleMenu()` only toggled `#ui-content`. `#status` and `#user-location` were siblings inside `#ui` but **outside** `#ui-content`, so they were never hidden. Any panel body element placed next to the toggled container is invisible to the collapse logic.
+- **Fix:** Centralised `applyMenuState()` toggles `#ui-content`, `#status`, and `#user-location` together (and drives the `[+]/[-]` label), called both on load and on every toggle.
+- **Rule:** A collapsible container must include **every** element that should hide. When you add a new line/section to a collapsible panel, either put it inside the toggled element or extend the toggle to cover it — and verify all three states (initial, expanded, collapsed) at desktop and mobile widths.
+
+---
+
 ## Recurring meta-pattern (the big one)
 
 Almost every wrong turn above traces to **not verifying reality before acting**:
