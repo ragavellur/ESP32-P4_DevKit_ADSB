@@ -314,18 +314,57 @@
         userLocDiv.innerText = `User GPS: Unavailable`;
     });
 
-    async function syncRoutesToMemory(currentAircraft) {
+    // Route lookup: adsbdb is a GET API and sends "Access-Control-Allow-Origin: *",
+    // so it works from the device's browser. (adsb.lol /api/0/routeset does NOT send
+    // CORS headers, so a browser POST is blocked with "Failed to fetch".)
+    const ROUTE_API = 'https://api.adsbdb.com/v0/callsign/';
+    const routeInflight = new Set();
+
+    async function fetchRouteForCallsign(callsign) {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 8000);
+        try {
+            const r = await fetch(ROUTE_API + encodeURIComponent(callsign), { signal: ctrl.signal });
+            if (!r.ok) {
+                routeMemory[callsign] = { not_found: true };
+                return;
+            }
+            const data = await r.json();
+            const fr = data && data.response && data.response.flightroute;
+            if (!fr || !fr.origin || !fr.destination) {
+                routeMemory[callsign] = { not_found: true };
+                return;
+            }
+            const o = fr.origin, d = fr.destination;
+            routeMemory[callsign] = {
+                airport_codes: `${o.icao_code || '???'}-${d.icao_code || '???'}`,
+                _airport_codes_iata: `${o.iata_code || '???'}-${d.iata_code || '???'}`,
+                _airports: [
+                    { name: o.name || o.municipality || 'Unknown', location: o.municipality || o.country_name || 'Unknown' },
+                    { name: d.name || d.municipality || 'Unknown', location: d.municipality || d.country_name || 'Unknown' }
+                ]
+            };
+        } catch (error) {
+            // network/CORS/abort: drop the pending marker so it can retry on a later sweep
+            if (routeMemory[callsign] && routeMemory[callsign].pending) delete routeMemory[callsign];
+        } finally {
+            clearTimeout(timer);
+            routeInflight.delete(callsign);
+        }
+    }
+
+    function syncRoutesToMemory(currentAircraft) {
         const activeCallsigns = new Set();
-        const planesToFetch = [];
 
         currentAircraft.forEach(ac => {
             if (ac.flight) {
                 const callsign = ac.flight.trim();
                 if (callsign) {
                     activeCallsigns.add(callsign);
-                    if (!routeMemory[callsign]) {
-                        planesToFetch.push({ callsign: callsign, lat: ac.lat || 0, lng: ac.lon || 0 });
-                        routeMemory[callsign] = { pending: true }; 
+                    if (!routeMemory[callsign] && !routeInflight.has(callsign)) {
+                        routeMemory[callsign] = { pending: true };
+                        routeInflight.add(callsign);
+                        fetchRouteForCallsign(callsign);
                     }
                 }
             }
@@ -334,31 +373,6 @@
         Object.keys(routeMemory).forEach(callsign => {
             if (!activeCallsigns.has(callsign)) delete routeMemory[callsign];
         });
-
-        if (planesToFetch.length > 0) {
-            try {
-                const response = await fetch('https://api.adsb.lol/api/0/routeset', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ planes: planesToFetch })
-                });
-                if (response.ok) {
-                    const data = await response.json(); 
-                    const responseMap = {};
-                    data.forEach(route => { if (route.callsign) responseMap[route.callsign] = route; });
-                    
-                    planesToFetch.forEach(plane => {
-                        const cs = plane.callsign;
-                        if (responseMap[cs]) routeMemory[cs] = responseMap[cs]; 
-                        else routeMemory[cs] = { not_found: true }; 
-                    });
-                }
-            } catch (error) {
-                planesToFetch.forEach(plane => {
-                    if (routeMemory[plane.callsign] && routeMemory[plane.callsign].pending) delete routeMemory[plane.callsign];
-                });
-            }
-        }
     }
 
     async function fetchAircraftData() {

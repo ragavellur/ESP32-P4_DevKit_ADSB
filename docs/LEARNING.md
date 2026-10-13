@@ -138,6 +138,15 @@ Each entry: symptom → root cause → fix → the rule to follow forever.
 
 ---
 
+## L18. Route lookup failed: `api.adsb.lol/api/0/routeset` sends no CORS headers
+
+- **Symptom:** Browser console showed `TypeError: Failed to fetch` (looked like "CORS or something") and route data never appeared; the failure was swallowed by the page's `try/catch`, so it was hard to see.
+- **Root cause:** The page is served over `http://` on a LAN IP (not `localhost`). A `POST` with `Content-Type: application/json` triggers a CORS **preflight** (`OPTIONS`). `api.adsb.lol/api/0/routeset` answers the preflight with `201` but sends **no** `Access-Control-Allow-Origin`, so the browser blocks the request entirely. (Verified with `curl -X OPTIONS … -H "Origin: …"`.)
+- **Fix:** Switched the route lookup to `https://api.adsbdb.com/v0/callsign/<CALLSIGN>` — a plain **GET** that sends `Access-Control-Allow-Origin: *` (no preflight), and mapped its `response.flightroute.{origin,destination}` into the shape the tooltip already expected (`airport_codes`, `_airport_codes_iata`, `_airports[]`). Per-callsign GETs replace the single batched POST; results are cached and de-duped via a `routeInflight` set, with an 8 s `AbortController` timeout.
+- **Rule:** Before wiring any third-party API into a browser page, `curl -D -` it (including an `Origin` header, and an `OPTIONS` preflight for non-simple requests) to confirm it actually sends CORS headers. Prefer simple `GET`s with `Access-Control-Allow-Origin: *`. If the API can't do CORS, a browser cannot call it — the only options are a server-side proxy or a different endpoint — never assume the fetch "just works".
+
+---
+
 ## Recurring meta-pattern (the big one)
 
 Almost every wrong turn above traces to **not verifying reality before acting**:
