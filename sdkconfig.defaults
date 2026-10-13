@@ -13,6 +13,11 @@ CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
+# Task WDT: adsb_dsp (core 1) runs the 2 MSPS decoder flat-out; the core-1 idle
+# task is expected to starve, so don't watch it (avoids a false-positive WDT
+# every ~5 s that floods the log). Other tasks are still watched.
+# CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1 is not set
+
 # Console
 CONFIG_CONSOLE_UART_DEFAULT=y
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y

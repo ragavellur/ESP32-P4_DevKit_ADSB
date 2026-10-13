@@ -195,3 +195,37 @@ Almost every wrong turn above traces to **not verifying reality before acting**:
 - **Fix:** `bit_spacing = 2400`, `half_bit_spacing = 1200` (`adsb_decoder.cpp:239-240`).
 - **Rule:** Any timing constant tied to sample rate must be derived from `sample_rate × time`, never hand-tuned per branch. When one constant in a branch disagrees with the others, suspect a typo, not a design.
 
+---
+
+## L23. Decoder silently dropped ~half of every IQ buffer (capacity < block size)
+
+- **Symptom:** Steady decode of only ~2-3 frames/s at 2.048 MSPS, with `eff≈2.0 MSPS` and `over=0 drops=0` — no error raised, just a persistently low rate (easy to mislabel as "weak signal").
+- **Root cause:** `AdsbDecoder::process_cu8()` copies each block into the fixed `magnitudes_` buffer under `if (count < kMagnitudeCapacity)`, with `kMagnitudeCapacity = 16640` — sized for the old **32 KiB** block. The pipeline now hands the decoder `IQ_BLOCK_BYTES = 64*1024` = **32768 sample-pairs** (the driver fills slots with the real URB length, up to 65536 bytes), so every sample past 16640 in each block was dropped — roughly **half of all IQ**, silently.
+- **Fix:** `process_cu8()` now splits each block into sub-runs of `kMagnitudeCapacity - kMaxFrameSamples` pairs and calls a new `process_pairs()` per sub-run (DC-filter accumulators + `overlap_` carried across sub-runs). No samples dropped, no frame straddling a sub-run boundary missed. `kMaxFrameSamples = 288` (2.4 MSPS frame length).
+- **Measured effect:** crc rate ≈ doubled immediately on the same RF (2-3/s → ~5/s); after moving the antenna outdoors, 2-3/s → ~15/s (burst) with tracks reaching 14-15 (user reported up to ~19).
+- **Rule:** A fixed-size staging buffer must be sized against the *actual* producer block size. A silent `if (count < cap)` drop is worse than a crash — it masquerades as weak signal. When a producer block size changes, grep every consumer buffer that assumed the old size.
+
+## L24. Status/adaptive-gain task starved on the saturated core 1
+
+- **Symptom:** (a) `E task_wdt: IDLE1 (CPU 1) did not reset` every ~5 s (log flood); (b) gain changes from the web UI and adaptive stepping appeared to do nothing; (c) the 1 Hz status line rarely printed.
+- **Root cause:** `rtl_driver` (prio 5), `adsb_dsp` (prio 6) and `rtl_stat` (prio 3) were **all pinned to core 1**. `adsb_dsp` runs the 2 MSPS decoder flat-out, so the prio-3 `rtl_stat` — which applies manual/adaptive gain and logs status — was starved, and core-1 IDLE never ran (`CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1=y`).
+- **Fix:** moved `rtl_stat` to **core 0** (prio 4, stack 3072). Status now logs cleanly every second and gain changes apply; also disabled `CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU1` (a saturated core-1 idle is expected; decode/CRC continue), which stopped the WDT flood.
+- **Rule:** On a dual-core MCU never co-locate a saturating DSP task and the housekeeping that services it on the same core at lower priority. Don't watch the idle task of a core you intend to keep saturated.
+
+## L25. Corrects L22: 2.4 MSPS is still unusable (preamble detection, not bit spacing)
+
+- **Correction to L22:** setting `bit_spacing`/`half_bit_spacing` to 2400/1200 was necessary but **not sufficient**. On the live device 2.4 MSPS still yields almost nothing: preamble count collapses from ~**+45/s** (2.048) to ~**+5/s**, crc ~0/s, while `eff≈2.39 MSPS` and `over=0 drops=0`.
+- **Where it fails:** `pre` is incremented *before* any bit decoding, so the fault is in preamble detection. The 2.4 branch uses `pulse_idx = {1,3,9,11}`, `first_center ∈ [17000,21000]`, `quiet_start = 19`. **Hypothesis (unverified):** `quiet_start = 19` samples = 7.9 µs sits at the start of the first data bit (8 µs = 19.2 samples) instead of inside the 4.5-8 µs guard, inflating the "quiet" level so the pulse-over-quiet threshold rejects real preambles; the ~2.4-sample-wide 2.4 MSPS pulses may also tie with neighbours under the strict `<=` local-max test.
+- **Status:** **2.4 MSPS is not a supported path.** Keep the default 2048000. A real fix needs the 2.4 preamble constants re-derived (quiet window in the guard, pulse-peak indices) and verified on live traffic.
+- **Rule:** A fix is not proven until the real signal path exercises it. Mark partially-verified branches explicitly rather than declaring them done.
+
+## L26. Gain: lower won; the factory "default" is the worst point on the curve
+
+- **Method:** With the fixed pipeline, two back-to-back manual-gain sweeps measured crc/s over ~15-16 s windows (traffic drifts slowly, so adjacent windows are comparable):
+  - Sweep 1 (desc): 496→4.57, 450→3.91, 400→5.91, **350→7.49**, 300→5.74 crc/s
+  - Sweep 2 (asc): 300→3.37, 325→3.24, **350→4.80**, 375→4.22, 400→2.68 crc/s
+- **Result:** **≈350 tenths-dB (35.0 dB) is the best manual gain.** 40 dB (the value the NVS happened to hold) and 49.6 dB were clearly worse. At 49.6 dB `pre` rose to ~+80/s (more noise preambles) while crc *fell* — extra front-end gain lifted the noise floor faster than the signal.
+- **Footgun (open item):** `GET /api/settings` reports `defaults{ gain:496, dc_filter:false, aggressive:false, crc_fix:false }` (`http_radar.c:258-264`) — **"Reset to Defaults" selects the worst-tested configuration** (max gain, all filters off). Not changed; noted for follow-up.
+- **Live state after tuning:** 2048000 sps, **35.0 dB manual**, `dc_filter`/`aggressive`/`crc_fix` ON, persisted to NVS. Observed 11-14 tracks concurrently (user reported up to ~19 at one point), max decoded range ~47 NM, `rf=OK`, `over=0 drops=0`.
+- **Rule:** "More gain" is not monotonic for a noise-limited receiver — find the knee. Don't let a factory default encode the worst point on the curve.
+

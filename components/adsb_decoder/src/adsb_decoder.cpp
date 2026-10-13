@@ -201,10 +201,25 @@ void Decoder::process_cu8(const uint8_t* data, size_t bytes, FrameCallback callb
                           void* context) {
   if (!data) return;
   bytes &= ~size_t{1};
+  const size_t pairs = bytes / 2;
+  /* magnitudes_ is a fixed buffer. Consume arbitrarily large blocks in
+   * sub-runs that leave room for the carry-over overlap, so no samples are
+   * silently dropped (a 64 KiB block = 32768 pairs > kMagnitudeCapacity). */
+  const size_t max_new_pairs = kMagnitudeCapacity - kMaxFrameSamples;
+  size_t off = 0;
+  while (off < pairs) {
+    const size_t n = std::min(pairs - off, max_new_pairs);
+    process_pairs(data + off * 2, n, callback, context);
+    off += n;
+  }
+}
+
+void Decoder::process_pairs(const uint8_t* data, size_t pairs, FrameCallback callback,
+                            void* context) {
   size_t count = overlap_;
-  for (size_t i = 0; i < bytes; i += 2) {
-    int iv = static_cast<int>(data[i]) - 127;
-    int qv = static_cast<int>(data[i + 1]) - 127;
+  for (size_t i = 0; i < pairs; ++i) {
+    int iv = static_cast<int>(data[i * 2]) - 127;
+    int qv = static_cast<int>(data[i * 2 + 1]) - 127;
     if (dc_filter_enabled_) {
       dc_i_accum_ += (iv - (dc_i_accum_ >> 12));
       dc_q_accum_ += (qv - (dc_q_accum_ >> 12));

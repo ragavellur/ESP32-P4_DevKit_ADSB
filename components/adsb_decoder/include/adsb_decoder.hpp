@@ -53,7 +53,14 @@ class Decoder {
     void set_sample_rate(uint32_t sample_rate_sps);
 
   private:
+    /* Process a run of sample pairs (cu8). May be called repeatedly by
+     * process_cu8() to consume blocks larger than magnitudes_ can hold; the
+     * carry-over overlap_ and DC-filter state are preserved across calls. */
+    void process_pairs(const uint8_t* data, size_t pairs, FrameCallback callback,
+                       void* context);
+
     static constexpr size_t kMagnitudeCapacity = 16640;
+    static constexpr size_t kMaxFrameSamples = 288; /* largest kFrameSamples (2.4 MSPS) */
     uint16_t magnitudes_[kMagnitudeCapacity]{};
     size_t overlap_ = 0;
     Stats stats_{};
