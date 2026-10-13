@@ -97,3 +97,11 @@
 - **Fix (`radar.html`):** replaced the inline two-line toggle with `applyMenuState()`, which sets display on `#ui-content`, `#status`, and `#user-location` together and updates the `[+]/[-]` label; called on load and on every toggle.
 - **Verified (no hardware):** both scripts pass `node --check`; browser test — desktop reload shows all expanded; mobile (500×667) reload starts fully collapsed (status/SYNC ERR hidden), expands to show all, collapses fully again.
 - **Note:** `SYNC ERR: Failed to fetch` is the `/data/aircraft.json` fetch failing at the network level (device unreachable from the browser), not a UI regression; it now correctly hides when collapsed.
+
+## 2026-10-12 — Route lookup fixed (CORS)
+
+- **Report:** Route data gave a CORS-style `Failed to fetch` error; user asked to either disable the route API or make it work.
+- **Root cause (reproduced locally):** `POST https://api.adsb.lol/api/0/routeset` with `Content-Type: application/json` triggers a preflight; the endpoint replies `201` but with **no `Access-Control-Allow-Origin`**, so the browser blocks it (LEARNING L18). Confirmed via `curl -X OPTIONS` and in-browser (`TypeError: Failed to fetch`).
+- **Fix (`radar.html`):** switched to `GET https://api.adsbdb.com/v0/callsign/<CALLSIGN>` (sends `ACAO: *`, no preflight). Mapped `response.flightroute.{origin,destination}` into the existing tooltip fields (`airport_codes`, `_airport_codes_iata`, `_airports[]`). Per-callsign GETs, cached in `routeMemory`, de-duped with a `routeInflight` set, 8 s `AbortController` timeout; failures drop the `pending` marker so a later sweep retries.
+- **Verified (no hardware, local mock server):** `fetchAircraftData()` → adsbdb `GET 200` (no preflight, no adsb.lol request); IGO123 resolved to VIDP–VILH / DEL–IXL with correct short + detailed formatting; unknown callsign → `not_found`; browser console clean. `node --check` clean; `idf.py build` clean.
+- **Pending:** on-device flash + real-browser check once Ethernet is connected.
