@@ -5,6 +5,7 @@ idf_component_register(
         "adsb_state.c"
         "eth_netif.c"
         "http_radar.c"
+        "beast_feeder.c"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS "."
     EMBED_TXTFILES "radar_data/radar.html"
@@ -17,5 +18,6 @@ idf_component_register(
         esp_http_server
         esp_netif
         nvs_flash
+        lwip
         log
 )

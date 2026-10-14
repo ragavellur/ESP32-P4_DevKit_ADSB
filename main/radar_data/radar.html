@@ -227,6 +227,21 @@
                 <option value="2400000">2400000 (2.4 MSPS)</option>
             </select>
         </div>
+        <div style="border-top: 1px dashed #004400; margin: 10px 0 8px; padding-top: 8px;">BharatRadar Feeder</div>
+        <div class="control-row"><span>Enable:</span>
+            <label class="switch">
+                <input type="checkbox" id="feedEnabled">
+                <span class="slider"></span>
+            </label>
+        </div>
+        <div class="control-row"><span>UUID:</span> <input type="text" id="feedUuid" maxlength="39" placeholder="00000000-0000-0000-0000-000000000000" style="width: 190px;"></div>
+        <div class="control-row"><span>Feeder Name:</span> <input type="text" id="feedName" maxlength="31" placeholder="optional" style="width: 190px;"></div>
+        <div class="control-row"><span>Host:</span> <input type="text" id="feedHost" maxlength="63" placeholder="feed.bharatradar.com" style="width: 190px;"></div>
+        <div class="control-row"><span>Port:</span> <input type="number" id="feedPort" value="30004" min="1" max="65535" style="width: 90px;"></div>
+        <div class="control-row" style="margin-top: 8px;">
+            <button id="btnSaveFeeder" style="width: 100%; background: #003300; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; padding: 8px; cursor: pointer;">Save Feeder</button>
+        </div>
+        <div id="feed-status" style="font-size: 11px; color: #00aa33; min-height: 14px; text-align: center;"></div>
         <div style="border-top: 1px dashed #004400; margin: 10px 0 8px; padding-top: 8px;">Receiver Location</div>
         <div class="control-row"><span>Latitude:</span> <input type="number" id="setLat" step="0.000001" value="18.480718" style="width: 100px;"></div>
         <div class="control-row"><span>Longitude:</span> <input type="number" id="setLon" step="0.000001" value="73.898235" style="width: 100px;"></div>
@@ -768,13 +783,23 @@
         status: document.getElementById("loc-status")
     };
 
+    const feederForm = {
+        enabled: document.getElementById("feedEnabled"),
+        uuid: document.getElementById("feedUuid"),
+        name: document.getElementById("feedName"),
+        host: document.getElementById("feedHost"),
+        port: document.getElementById("feedPort"),
+        btnSave: document.getElementById("btnSaveFeeder"),
+        status: document.getElementById("feed-status")
+    };
+
     window.toggleSettingsPanel = (function() {
         let settingsOpen = false;
         return function() {
             settingsOpen = !settingsOpen;
             settingsContent.style.display = settingsOpen ? "block" : "none";
             settingsToggleBtn.innerText = settingsOpen ? "[-]" : "[+]";
-            if (settingsOpen) { loadSettings(); loadLocation(); }
+            if (settingsOpen) { loadSettings(); loadLocation(); loadFeeder(); }
         };
     })();
 
@@ -838,6 +863,65 @@
             loadSettings();
         } catch (err) {
             alert("Failed to reset settings: " + err.message);
+        }
+    }
+
+    // --- BharatRadar feeder ---
+    function setFeedStatus(msg, ok) {
+        if (!feederForm.status) return;
+        feederForm.status.textContent = msg;
+        feederForm.status.style.color = ok ? "#00aa33" : "#ff5555";
+    }
+
+    async function loadFeeder() {
+        try {
+            const r = await fetch("/api/feeder");
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            const f = await r.json();
+            if (feederForm.enabled) feederForm.enabled.checked = !!f.enabled;
+            if (feederForm.uuid && f.uuid) feederForm.uuid.value = f.uuid;
+            if (feederForm.name && f.feeder_name) feederForm.name.value = f.feeder_name;
+            if (feederForm.host) feederForm.host.value = f.host;
+            if (feederForm.port) feederForm.port.value = f.port;
+            const s = f.status || {};
+            if (f.enabled) {
+                setFeedStatus(
+                    (s.connected ? "connected" : "not connected") +
+                    " - sent " + (s.sent || 0) + ", queued " + (s.queued || 0) +
+                    (s.dropped ? ", dropped " + s.dropped : ""),
+                    !!s.connected
+                );
+            } else {
+                setFeedStatus("disabled", true);
+            }
+        } catch (err) {
+            console.error("Failed to load feeder config:", err);
+        }
+    }
+
+    async function saveFeeder() {
+        const body = {
+            enabled: feederForm.enabled.checked,
+            uuid: (feederForm.uuid.value || "").trim(),
+            feeder_name: (feederForm.name.value || "").trim(),
+            host: (feederForm.host.value || "").trim() || "feed.bharatradar.com",
+            port: parseInt(feederForm.port.value, 10) || 30004
+        };
+        if (body.enabled && body.uuid.length < 28) {
+            setFeedStatus("UUID must be at least 28 characters", false);
+            return;
+        }
+        try {
+            const r = await fetch("/api/feeder", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+            });
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            setFeedStatus("saved", true);
+            loadFeeder();
+        } catch (err) {
+            setFeedStatus("save failed: " + err.message, false);
         }
     }
 
@@ -911,6 +995,7 @@
     if (settingsForm.sampleRate) settingsForm.sampleRate.addEventListener("change", () => {});
     if (settingsForm.btnReset) settingsForm.btnReset.addEventListener("click", resetSettings);
     if (settingsForm.btnSave) settingsForm.btnSave.addEventListener("click", saveSettings);
+    if (feederForm.btnSave) feederForm.btnSave.addEventListener("click", saveFeeder);
     if (locationForm.btnBrowser) locationForm.btnBrowser.addEventListener("click", useBrowserLocation);
     if (locationForm.btnApply) locationForm.btnApply.addEventListener("click", applyLocation);
 

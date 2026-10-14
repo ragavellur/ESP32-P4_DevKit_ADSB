@@ -378,3 +378,30 @@ resolution; it is also strictly better than float at every level.
 **Lesson:** a magnitude/magnitude-like change is only validated when it is exercised
 at the signal levels that actually occur. Benchmark on the target ISA, not the
 host - the sqrt ranking inverts between x86 and RV32F.
+
+## L32 — Adding HTTP routes silently disables the whole server (`max_uri_handlers`)
+
+Adding two routes to the radar web server (`/api/feeder` GET + POST) took the
+total from 12 to 13. `httpd_config_t.max_uri_handlers` was set to exactly `12`,
+so the 13th registration failed and **`httpd_start()` never ran at all**:
+
+```
+E http_radar: uri registration failed
+E eth_netif: http server failed
+```
+
+The device booted, streamed IQ, decoded frames, and ran the feeder task
+perfectly — but there was **no web UI and no API at all**, so from the outside it
+looked like "the network is down". The feeder task had already connected and
+was happily sending frames, which made the failure look even more like a network
+problem than a firmware one.
+
+**Lesson:** `max_uri_handlers` is a hard cap and exceeding it fails *at
+registration*, taking down every route, not just the new one. Never size it at
+today's route count.
+
+**Rule:** set `max_uri_handlers` with headroom (16 for 13 routes here), and
+treat `uri registration failed` as a route-count problem first. When the device
+behaves normally over USB but the browser cannot connect, read the serial log
+*before* blaming Ethernet or DHCP — the failure here was a one-line config
+value, and the boot log named it outright.
