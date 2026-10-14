@@ -53,6 +53,11 @@ static constexpr UBaseType_t kUsbPrio = 20;
 static constexpr UBaseType_t kClientPrio = 19;
 /* Delivery only posts IQ; app audio task should be >= this and graphics much lower. */
 static constexpr UBaseType_t kDeliveryPrio = 18;
+
+/* Number of recent IQ blocks the RF-level window spans. At 2.4 MSPS a 64 KiB
+ * block is ~13 ms, so 32 blocks is ~0.4 s of signal - long enough to be
+ * stable, short enough that the reported level tracks current conditions. */
+static constexpr size_t kRfWindowBlocks = 32;
 static constexpr size_t kProbeQueueDepth = 8;
 
 static constexpr uint16_t kVid = ESP_RTL_SDR_USB_VID;
@@ -301,6 +306,25 @@ struct esp_rtl_sdr_handle {
     /** Health emission throttle (delivery task). */
     uint32_t health_emit_blocks = 0;
     esp_rtl_sdr_health_t last_emitted_health = ESP_RTL_SDR_HEALTH_UNKNOWN;
+
+    /* RF level tracking.
+     *
+     * The old code kept metrics.sample_min/sample_max as a running cumulative
+     * min/max that was never reset by start(). One transient spike during boot
+     * latched the rails forever, so health permanently reported
+     * "RF clipping - reduce gain" even while frames were decoding normally -
+     * which actively misled the operator into lowering gain until reception
+     * collapsed (0 dB gain -> no aircraft at all).
+     *
+     * Now we keep a rolling window of the most recent blocks so the reported
+     * level reflects current conditions, and we scan both I and Q across the
+     * whole block instead of 1-in-64 samples of I only. */
+    uint8_t rf_min[kRfWindowBlocks];
+    uint8_t rf_max[kRfWindowBlocks];
+    uint32_t rf_clip_streak = 0;  /* consecutive blocks pinned at both rails */
+    uint32_t rf_weak_streak = 0;  /* consecutive blocks with tiny swing */
+    uint32_t rf_win_index = 0;
+    uint32_t rf_win_filled = 0;
 
     /** Phase 3 preferences (not applied until CAP_GAIN / CAP_BIAS_TEE). */
     esp_rtl_sdr_gain_mode_t gain_mode = ESP_RTL_SDR_GAIN_MODE_AUTO;
@@ -1224,8 +1248,11 @@ static void bulk_cb(usb_transfer_t *xfer)
                 h->metrics.bytes_total += copy;
                 h->metrics.blocks_total++;
                 if (copy > 0) {
+                    /* Scan the whole block (both I and Q) - the previous
+                     * 1-in-64 I-only scan missed real excursions and made
+                     * the health verdict essentially random. */
                     uint8_t mn = 255, mx = 0;
-                    for (size_t i = 0; i < copy; i += 64) {
+                    for (size_t i = 0; i < copy; i++) {
                         const uint8_t v = slot->data[i];
                         if (v < mn) {
                             mn = v;
@@ -1234,16 +1261,11 @@ static void bulk_cb(usb_transfer_t *xfer)
                             mx = v;
                         }
                     }
-                    if (h->metrics.blocks_total == 1) {
-                        h->metrics.sample_min = mn;
-                        h->metrics.sample_max = mx;
-                    } else {
-                        if (mn < h->metrics.sample_min) {
-                            h->metrics.sample_min = mn;
-                        }
-                        if (mx > h->metrics.sample_max) {
-                            h->metrics.sample_max = mx;
-                        }
+                    h->rf_min[h->rf_win_index] = mn;
+                    h->rf_max[h->rf_win_index] = mx;
+                    h->rf_win_index = (h->rf_win_index + 1) % kRfWindowBlocks;
+                    if (h->rf_win_filled < kRfWindowBlocks) {
+                        h->rf_win_filled++;
                     }
                 }
             }
@@ -1658,6 +1680,10 @@ static esp_err_t apply_pending_sideband_ep0(esp_rtl_sdr_handle *h);
 /** Emit EVT_HEALTH on overall change, or every N IQ blocks while streaming.
  *  See docs/RUNTIME_CONSTANTS.md — apps may poll get_health() at any rate. */
 static constexpr uint32_t kHealthPeriodBlocks = 48;
+
+/* Consecutive rail-pinned (or dead-flat) blocks required before the RF health
+ * verdict flips. Guards against one transient block latching a false alarm. */
+static constexpr uint32_t kRfClipStreakBlocks = 8;
 
 static void delivery_task_fn(void *arg)
 {
@@ -2779,6 +2805,14 @@ esp_err_t esp_rtl_sdr_start(esp_rtl_sdr_handle_t handle,
         handle->metrics.blocks_total = 0;
         handle->metrics.overruns = 0;
         handle->metrics.consumer_drops = 0;
+        /* RF level window must not survive a restart - otherwise the previous
+         * session's peak (or a boot spike) is reported for the new one. */
+        handle->metrics.sample_min = 255;
+        handle->metrics.sample_max = 0;
+        handle->rf_win_index = 0;
+        handle->rf_win_filled = 0;
+        handle->rf_clip_streak = 0;
+        handle->rf_weak_streak = 0;
         handle->stream_start_ms = now_ms();
         handle->pending_retune_hz = 0;
         handle->retune_busy = false;
@@ -3428,6 +3462,43 @@ esp_err_t esp_rtl_sdr_select_device_serial(esp_rtl_sdr_handle_t handle, const ch
 static constexpr uint32_t kAdsbHz = 1090000000u;
 static constexpr uint32_t kHfDefaultHz = 10000000u; /* WWV 10 MHz — native HF via upconverter */
 
+/**
+ * Current RF level across the rolling block window, plus clip/weak streaks.
+ * Writes metrics.sample_min/sample_max so get_metrics()/get_health() report
+ * *recent* conditions instead of a value latched at boot.
+ */
+static void refresh_rf_window(esp_rtl_sdr_handle *h)
+{
+    if (h->rf_win_filled == 0) {
+        return;
+    }
+    uint8_t mn = 255, mx = 0;
+    for (uint32_t i = 0; i < h->rf_win_filled; ++i) {
+        if (h->rf_min[i] < mn) mn = h->rf_min[i];
+        if (h->rf_max[i] > mx) mx = h->rf_max[i];
+    }
+    h->metrics.sample_min = mn;
+    h->metrics.sample_max = mx;
+
+    const uint32_t last = (h->rf_win_index + kRfWindowBlocks - 1) % kRfWindowBlocks;
+    const uint8_t lmn = h->rf_min[last];
+    const uint8_t lmx = h->rf_max[last];
+    const int lsw = static_cast<int>(lmx) - static_cast<int>(lmn);
+
+    /* Require several consecutive rail-pinned blocks before declaring
+     * clipping, so a single transient can no longer latch the alert. */
+    if (lmx >= 250 && lmn <= 5) {
+        h->rf_clip_streak++;
+    } else {
+        h->rf_clip_streak = 0;
+    }
+    if (lsw < 16) {
+        h->rf_weak_streak++;
+    } else {
+        h->rf_weak_streak = 0;
+    }
+}
+
 static void fill_health_info(const esp_rtl_sdr_handle *h, esp_rtl_sdr_health_info_t *out)
 {
     std::memset(out, 0, sizeof(*out));
@@ -3476,23 +3547,29 @@ static void fill_health_info(const esp_rtl_sdr_handle *h, esp_rtl_sdr_health_inf
                       static_cast<unsigned>(h->metrics.consumer_drops));
     }
 
+    /* Refresh the rolling RF window so the verdict reflects current blocks.
+     * (fill_health_info takes a const handle; the window fields are only
+     * written here from the delivery path and read here.) */
     const int swing =
         static_cast<int>(out->sample_max) - static_cast<int>(out->sample_min);
-    if (out->sample_max >= 250 && out->sample_min <= 8) {
+    /* Sustained rail contact only - a single transient block must not latch
+     * the clipping alert for the rest of the session. */
+    if (h->rf_clip_streak >= kRfClipStreakBlocks) {
         out->rf = ESP_RTL_SDR_HEALTH_RF_CLIPPING;
         if (out->overall == ESP_RTL_SDR_HEALTH_OK) {
             out->overall = ESP_RTL_SDR_HEALTH_RF_CLIPPING;
             std::snprintf(out->advice, sizeof(out->advice),
-                          "RF clipping - reduce gain when CAP_GAIN measured");
+                          "RF clipping - reduce gain (sustained rail saturation)");
         }
-    } else if (h->metrics.blocks_total > 4 && swing >= 0 && swing < 16) {
+    } else if (h->rf_weak_streak >= kRfClipStreakBlocks) {
         out->rf = ESP_RTL_SDR_HEALTH_RF_WEAK;
         if (out->overall == ESP_RTL_SDR_HEALTH_OK) {
             out->overall = ESP_RTL_SDR_HEALTH_RF_WEAK;
             std::snprintf(out->advice, sizeof(out->advice),
-                          "RF weak swing - antenna, LO, or raise gain (when CAP_GAIN)");
+                          "RF weak swing - check antenna seating / raise gain");
         }
     }
+    (void)swing;
 }
 
 esp_err_t esp_rtl_sdr_apply_need(esp_rtl_sdr_handle_t handle, esp_rtl_sdr_need_t need)
@@ -3510,7 +3587,7 @@ esp_err_t esp_rtl_sdr_apply_need(esp_rtl_sdr_handle_t handle, esp_rtl_sdr_need_t
         break;
     case ESP_RTL_SDR_NEED_ADSB:
         freq = kAdsbHz;
-        rate = ESP_RTL_SDR_RATE_2048K;
+        rate = ESP_RTL_SDR_RATE_2400K;
         break;
     case ESP_RTL_SDR_NEED_WX:
         freq = ESP_RTL_SDR_PRESET_NOAA_HZ;
@@ -3591,6 +3668,7 @@ esp_err_t esp_rtl_sdr_get_health(esp_rtl_sdr_handle_t handle,
     if (!lk.ok()) {
         return ESP_RTL_SDR_ERR_TIMEOUT;
     }
+    refresh_rf_window(handle);
     fill_health_info(handle, out_health);
     return ESP_OK;
 }

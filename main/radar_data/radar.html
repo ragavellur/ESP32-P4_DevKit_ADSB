@@ -28,6 +28,9 @@
         input[type="number"] { width: 65px; }
         
         #status { font-size: 11px; color: #00aa33; margin-top: 5px; }
+        #decode-stats { font-size: 11px; color: #00aa33; margin-top: 3px; font-variant-numeric: tabular-nums; }
+        #decode-stats.warn { color: #dda000; }
+        #decode-stats.bad { color: #ff4444; font-weight: bold; }
         #user-location { font-size: 11px; color: #008822; border-top: 1px dashed #004400; padding-top: 5px; margin-top: 5px; }
 
         /* HUD wrapper: transparent on desktop, so panels keep their corner positions */
@@ -167,6 +170,7 @@
         </div>
     </div>
     <div id="status">Waiting for sweep...</div>
+    <div id="decode-stats">Decode:&nbsp;--</div>
     <div id="user-location">User GPS: Fetching...</div>
 </div>
 
@@ -1078,10 +1082,60 @@ function pollHealth() {
         .catch(() => { /* keep last known state */ });
 }
 
+/* Live decode-rate readout.
+ * Uses /api/debug and derives a per-second rate from the *cumulative*
+ * totals between polls, so it updates every few seconds instead of only once
+ * per minute like the server-side 60 s window.
+ *   green  = CRC flowing normally
+ *   amber  = preambles detected but no CRC (weak signal / bad tuning)
+ *   red    = nothing at all (stalled or no signal)
+ */
+let lastDbg = null;
+let lastDbgAt = 0;
+function pollDebug() {
+    const el = document.getElementById("decode-stats");
+    fetch("/api/debug")
+        .then(r => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)))
+        .then(d => {
+            const now = performance.now();
+            const t = d.totals || {};
+            let crcPs = null, prePs = null;
+            if (lastDbg && now > lastDbgAt) {
+                const dt = (now - lastDbgAt) / 1000;
+                crcPs = Math.max(0, t.crc_ok - lastDbg.crc_ok) / dt;
+                prePs = Math.max(0, t.preambles - lastDbg.preambles) / dt;
+            }
+            lastDbg = { crc_ok: t.crc_ok || 0, preambles: t.preambles || 0 };
+            lastDbgAt = now;
+
+            const rate = (v) => (v === null ? "--" : v.toFixed(1));
+            const rf = d.health && d.health.advice ? d.health.advice : "";
+            let txt = "Decode: " + rate(crcPs) + " CRC/s | " + rate(prePs) + " pre/s";
+            txt += " | " + (t.tracks || 0) + " tracks | ring " + (d.pipe ? d.pipe.ring_free : "?");
+            txt += " | " + (d.config ? d.config.gain_tenth_db / 10 : "?").toFixed(1) + "dB";
+            el.textContent = txt;
+            el.title = rf;
+
+            el.classList.remove("warn", "bad");
+            if (crcPs !== null) {
+                if (crcPs > 0) {
+                    /* healthy */
+                } else if (prePs > 0) {
+                    el.classList.add("warn");
+                } else {
+                    el.classList.add("bad");
+                }
+            }
+        })
+        .catch(() => { /* keep last known state */ });
+}
+
 alertApplyBtn.addEventListener("click", (e) => { e.stopPropagation(); applyAlertFix(); });
 alertDismissBtn.addEventListener("click", (e) => { e.stopPropagation(); dismissAlert(); });
 pollHealth();
 setInterval(pollHealth, 3000);
+pollDebug();
+setInterval(pollDebug, 3000);
 </script>
 </body>
 </html>

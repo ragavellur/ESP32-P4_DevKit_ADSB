@@ -67,6 +67,43 @@ esp_err_t rtl_pipeline_init(void);
 /* Fill *out with a metrics snapshot. Never blocks for long. */
 void rtl_pipeline_get_status(rtl_pipeline_status_t *out);
 
+/* Rich decode diagnostics for USB-less verification (served by /api/debug).
+ * Everything needed to judge reception health from the web UI alone. */
+typedef struct {
+    uint32_t preambles_total;      /**< decoder preambles detected (cumulative) */
+    uint32_t frames_total;         /**< candidate frames (cumulative) */
+    uint32_t crc_total;            /**< CRC-valid frames (cumulative) */
+    uint32_t df17_total;           /**< DF17 count (cumulative) */
+    uint32_t bytes_total;          /**< IQ bytes delivered by driver (cumulative) */
+    uint16_t mag_min;              /**< decoder magnitude min (cumulative) */
+    uint16_t mag_max;              /**< decoder magnitude max (cumulative) */
+    /* 60 s window (0 until the first full window elapses) */
+    uint32_t win60_seconds;
+    uint32_t win60_preamble;
+    uint32_t win60_frames;
+    uint32_t win60_crc;
+    uint32_t win60_df17;
+    uint32_t win60_bytes;
+    uint32_t win60_effective_sps;
+    /* Tunables / config actually in effect */
+    uint32_t programmed_sps;
+    uint32_t preamble_threshold;
+    int32_t  gain_tenth_db;
+    uint8_t  gain_mode;
+    bool     dc_filter;
+    bool     crc_fix;
+    /* health */
+    uint8_t  health_usb;
+    uint8_t  health_rf;
+    uint8_t  health_overall;
+    float    health_efficiency;
+    uint8_t  sample_min;
+    uint8_t  sample_max;
+    char     advice[96];
+} rtl_pipeline_debug_t;
+
+void rtl_pipeline_get_debug(rtl_pipeline_debug_t *out);
+
 /* Snapshot up to cap live aircraft tracks (mutex-guarded). Returns count. */
 uint32_t rtl_pipeline_fill_aircraft(adsb_aircraft_t *out, uint32_t cap);
 

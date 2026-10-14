@@ -81,6 +81,9 @@ void adsb_decoder_bridge_set_crc_fix(bool enable);
 
 void adsb_decoder_bridge_set_sample_rate(uint32_t sample_rate_sps);
 
+/* Noise-adaptive preamble gate (readsb --preamble-threshold). */
+void adsb_decoder_bridge_set_preamble_threshold(uint32_t threshold);
+
 #ifdef __cplusplus
 }
 #endif

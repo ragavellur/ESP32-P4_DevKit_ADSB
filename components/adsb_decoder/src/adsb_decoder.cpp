@@ -26,12 +26,7 @@ uint32_t crc_payload(const uint8_t* frame, int data_bits) {
   return crc;
 }
 
-uint32_t interpolate(const uint16_t* samples, size_t milli_index) {
-  const size_t index = milli_index / 1000u;
-  const uint32_t fraction = static_cast<uint32_t>(milli_index % 1000u);
-  return static_cast<uint32_t>(samples[index]) * (1000u - fraction) +
-         static_cast<uint32_t>(samples[index + 1]) * fraction;
-}
+
 
 bool parse(const uint8_t* bytes, uint8_t bit_length, uint16_t signal, Frame* out) {
   const uint8_t df = bytes[0] >> 3;
@@ -171,17 +166,15 @@ bool decode_global_cpr(const Frame& first, const Frame& second, bool use_odd,
 void Decoder::reset() {
   overlap_ = 0;
   stats_ = {};
-  dc_i_accum_ = 0;
-  dc_q_accum_ = 0;
-  dc_sample_count_ = 0;
+  dc_z1_i_ = 0.0f;
+  dc_z1_q_ = 0.0f;
 }
 
 void Decoder::set_dc_filter(bool enable) {
   dc_filter_enabled_ = enable;
-  if (enable) {
-    dc_i_accum_ = 0;
-    dc_q_accum_ = 0;
-    dc_sample_count_ = 0;
+  if (!enable) {
+    dc_z1_i_ = 0.0f;
+    dc_z1_q_ = 0.0f;
   }
 }
 
@@ -197,15 +190,20 @@ void Decoder::set_sample_rate(uint32_t sample_rate_sps) {
   sample_rate_sps_ = sample_rate_sps;
 }
 
+void Decoder::set_preamble_threshold(uint32_t threshold) {
+  preamble_threshold_ = threshold;
+}
+
 void Decoder::process_cu8(const uint8_t* data, size_t bytes, FrameCallback callback,
                           void* context) {
   if (!data) return;
   bytes &= ~size_t{1};
   const size_t pairs = bytes / 2;
+  if (pairs == 0) return;
   /* magnitudes_ is a fixed buffer. Consume arbitrarily large blocks in
    * sub-runs that leave room for the carry-over overlap, so no samples are
    * silently dropped (a 64 KiB block = 32768 pairs > kMagnitudeCapacity). */
-  const size_t max_new_pairs = kMagnitudeCapacity - kMaxFrameSamples;
+  const size_t max_new_pairs = kMagnitudeCapacity - kTrailingSamples;
   size_t off = 0;
   while (off < pairs) {
     const size_t n = std::min(pairs - off, max_new_pairs);
@@ -214,118 +212,184 @@ void Decoder::process_cu8(const uint8_t* data, size_t bytes, FrameCallback callb
   }
 }
 
+/* --------------------------------------------------------------------------
+ * dump1090 / readsb demodulate2400 (2.4 MSPS), ported.
+ *
+ * Reference: readsb demod_2400.c + convert.c (uc8 magnitude) + mode_s.c
+ * (CRC). Behaviour differences from the previous hand-rolled detector:
+ *   - magnitude is linear amplitude  sqrt((I-127.5)^2 + (Q-127.5)^2)
+ *     normalized to 0..65535, not |I|+|Q|.
+ *   - DC removal is a 1 Hz single-pole high-pass (readsb exp(-2*pi/sr)),
+ *     not a 1/4096 running mean.
+ *   - preamble uses readsb's pulse-shape pre-check and a noise-adaptive
+ *     threshold ref_level = base_noise * preamble_threshold / 32.
+ *   - bits are recovered by 5-phase DC-balanced correlation (slice_phase0..4)
+ *     instead of a single fixed-phase 2-point compare.
+ * -------------------------------------------------------------------------- */
+namespace {
+
+constexpr uint32_t kModesLongMsgBytes = 14;
+constexpr uint32_t kModesShortMsgBytes = 7;
+
+// DC-balanced 3/4-tap correlation slicers (verbatim from readsb demod_2400.c).
+inline int slice_phase0(const uint16_t* m) { return 18 * m[0] - 15 * m[1] - 3 * m[2]; }
+inline int slice_phase1(const uint16_t* m) { return 14 * m[0] - 5 * m[1] - 9 * m[2]; }
+inline int slice_phase2(const uint16_t* m) { return 16 * m[0] + 5 * m[1] - 20 * m[2]; }
+inline int slice_phase3(const uint16_t* m) { return 7 * m[0] + 11 * m[1] - 18 * m[2]; }
+inline int slice_phase4(const uint16_t* m) { return 4 * m[0] + 15 * m[1] - 20 * m[2] + m[3]; }
+
+inline uint8_t slice_byte(const uint16_t** pPtr, int* phase) {
+  const uint16_t* p = *pPtr;
+  uint8_t b = 0;
+  switch (*phase) {
+    case 0:
+      b = (slice_phase0(p) > 0 ? 0x80 : 0) | (slice_phase2(p + 2) > 0 ? 0x40 : 0) |
+          (slice_phase4(p + 4) > 0 ? 0x20 : 0) | (slice_phase1(p + 7) > 0 ? 0x10 : 0) |
+          (slice_phase3(p + 9) > 0 ? 0x08 : 0) | (slice_phase0(p + 12) > 0 ? 0x04 : 0) |
+          (slice_phase2(p + 14) > 0 ? 0x02 : 0) | (slice_phase4(p + 16) > 0 ? 0x01 : 0);
+      *phase = 1; *pPtr = p + 19; break;
+    case 1:
+      b = (slice_phase1(p) > 0 ? 0x80 : 0) | (slice_phase3(p + 2) > 0 ? 0x40 : 0) |
+          (slice_phase0(p + 5) > 0 ? 0x20 : 0) | (slice_phase2(p + 7) > 0 ? 0x10 : 0) |
+          (slice_phase4(p + 9) > 0 ? 0x08 : 0) | (slice_phase1(p + 12) > 0 ? 0x04 : 0) |
+          (slice_phase3(p + 14) > 0 ? 0x02 : 0) | (slice_phase0(p + 17) > 0 ? 0x01 : 0);
+      *phase = 2; *pPtr = p + 19; break;
+    case 2:
+      b = (slice_phase2(p) > 0 ? 0x80 : 0) | (slice_phase4(p + 2) > 0 ? 0x40 : 0) |
+          (slice_phase1(p + 5) > 0 ? 0x20 : 0) | (slice_phase3(p + 7) > 0 ? 0x10 : 0) |
+          (slice_phase0(p + 10) > 0 ? 0x08 : 0) | (slice_phase2(p + 12) > 0 ? 0x04 : 0) |
+          (slice_phase4(p + 14) > 0 ? 0x02 : 0) | (slice_phase1(p + 17) > 0 ? 0x01 : 0);
+      *phase = 3; *pPtr = p + 19; break;
+    case 3:
+      b = (slice_phase3(p) > 0 ? 0x80 : 0) | (slice_phase0(p + 3) > 0 ? 0x40 : 0) |
+          (slice_phase2(p + 5) > 0 ? 0x20 : 0) | (slice_phase4(p + 7) > 0 ? 0x10 : 0) |
+          (slice_phase1(p + 10) > 0 ? 0x08 : 0) | (slice_phase3(p + 12) > 0 ? 0x04 : 0) |
+          (slice_phase0(p + 15) > 0 ? 0x02 : 0) | (slice_phase2(p + 17) > 0 ? 0x01 : 0);
+      *phase = 4; *pPtr = p + 19; break;
+    default:
+      b = (slice_phase4(p) > 0 ? 0x80 : 0) | (slice_phase1(p + 3) > 0 ? 0x40 : 0) |
+          (slice_phase3(p + 5) > 0 ? 0x20 : 0) | (slice_phase0(p + 8) > 0 ? 0x10 : 0) |
+          (slice_phase2(p + 10) > 0 ? 0x08 : 0) | (slice_phase4(p + 12) > 0 ? 0x04 : 0) |
+          (slice_phase1(p + 15) > 0 ? 0x02 : 0) | (slice_phase3(p + 17) > 0 ? 0x01 : 0);
+      *phase = 0; *pPtr = p + 20; break;
+  }
+  return b;
+}
+
+uint32_t valid_df_short_bitset = 0;
+uint32_t valid_df_long_bitset = 0;
+
+void init_bitsets_once() {
+  if (valid_df_short_bitset != 0) return;
+  /* DFs understood without correction. */
+  valid_df_short_bitset = (1u << 0) | (1u << 4) | (1u << 5) | (1u << 11);
+  valid_df_long_bitset = (1u << 16) | (1u << 17) | (1u << 18) | (1u << 20) | (1u << 21);
+}
+
+}  // namespace
+
 void Decoder::process_pairs(const uint8_t* data, size_t pairs, FrameCallback callback,
                             void* context) {
+  init_bitsets_once();
+
+  /* --- magnitude: readsb uc8 conversion (linear amplitude, 1 Hz DC high-pass) --- */
+  const float inv = 1.0f / 127.5f;
+  if (dc_filter_enabled_) {
+    /* readsb: dc_b = exp(-2*pi*1.0/sample_rate); dc_a = 1 - dc_b */
+    dc_b_ = std::exp(-2.0f * 3.14159265358979323846f / static_cast<float>(sample_rate_sps_));
+    dc_a_ = 1.0f - dc_b_;
+  }
   size_t count = overlap_;
-  for (size_t i = 0; i < pairs; ++i) {
-    int iv = static_cast<int>(data[i * 2]) - 127;
-    int qv = static_cast<int>(data[i * 2 + 1]) - 127;
+  for (size_t i = 0; i < pairs && count < kMagnitudeCapacity; ++i) {
+    float fI = (static_cast<float>(data[i * 2]) - 127.5f) * inv;
+    float fQ = (static_cast<float>(data[i * 2 + 1]) - 127.5f) * inv;
     if (dc_filter_enabled_) {
-      dc_i_accum_ += (iv - (dc_i_accum_ >> 12));
-      dc_q_accum_ += (qv - (dc_q_accum_ >> 12));
-      int dc_i = dc_i_accum_ >> 12;
-      int dc_q = dc_q_accum_ >> 12;
-      iv -= dc_i;
-      qv -= dc_q;
+      dc_z1_i_ = fI * dc_a_ + dc_z1_i_ * dc_b_;
+      dc_z1_q_ = fQ * dc_a_ + dc_z1_q_ * dc_b_;
+      fI -= dc_z1_i_;
+      fQ -= dc_z1_q_;
     }
-    if (count < kMagnitudeCapacity) {
-      const uint16_t magnitude = static_cast<uint16_t>(std::abs(iv) + std::abs(qv));
-      stats_.magnitude_min = std::min(stats_.magnitude_min, magnitude);
-      stats_.magnitude_max = std::max(stats_.magnitude_max, magnitude);
-      magnitudes_[count++] = magnitude;
-    }
-  }
-constexpr size_t kFrameSamples_2048 = 246;
-  constexpr size_t kFrameSamples_2400 = 288;
-  size_t kFrameSamples;
-  size_t bit_spacing;
-  size_t half_bit_spacing;
-  size_t first_center_min;
-  size_t first_center_max;
-  size_t pulse_idx[4];
-  size_t quiet_start;
-  size_t quiet_len;
-
-  if (sample_rate_sps_ == 2400000) {
-    kFrameSamples = kFrameSamples_2400;
-    /* One Mode-S bit is 1.0 us. At 2.4 MSPS that is 2.4 samples = 2400
-     * milli-samples (see interpolate(): indices are in milli-samples).
-     * These must scale with the sample rate, not be halved. */
-    bit_spacing = 2400;
-    half_bit_spacing = 1200;
-    first_center_min = 17000;
-    first_center_max = 21000;
-    size_t pidx[4] = {1, 3, 9, 11};
-    for (int i = 0; i < 4; ++i) pulse_idx[i] = pidx[i];
-    quiet_start = 19; quiet_len = 5;
-  } else {
-    kFrameSamples = kFrameSamples_2048;
-    bit_spacing = 2048;
-    half_bit_spacing = 1024;
-    first_center_min = 15946;
-    first_center_max = 16846;
-    size_t pidx[4] = {0, 2, 7, 9};
-    for (int i = 0; i < 4; ++i) pulse_idx[i] = pidx[i];
-    quiet_start = 11; quiet_len = 5;
+    float magsq = fI * fI + fQ * fQ;
+    if (magsq > 1.0f) magsq = 1.0f;
+    const uint16_t mag = static_cast<uint16_t>(std::sqrt(magsq) * 65535.0f + 0.5f);
+    stats_.magnitude_min = std::min(stats_.magnitude_min, mag);
+    stats_.magnitude_max = std::max(stats_.magnitude_max, mag);
+    magnitudes_[count++] = mag;
   }
 
-  for (size_t pos = 0; pos + kFrameSamples + 1 <= count; ++pos) {
-    const uint16_t* sample = magnitudes_ + pos;
-    if (sample[pulse_idx[0]] <= sample[pulse_idx[0]+1] ||
-        sample[pulse_idx[1]] <= sample[pulse_idx[1]-1] || sample[pulse_idx[1]] <= sample[pulse_idx[1]+1] ||
-        sample[pulse_idx[2]] <= sample[pulse_idx[2]-1] || sample[pulse_idx[2]] <= sample[pulse_idx[2]+1] ||
-        sample[pulse_idx[3]] <= sample[pulse_idx[3]-1] || sample[pulse_idx[3]] <= sample[pulse_idx[3]+1])
-      continue;
-    const uint16_t pulse = static_cast<uint16_t>(
-        (sample[pulse_idx[0]] + sample[pulse_idx[1]] +
-         sample[pulse_idx[2]] + sample[pulse_idx[3]]) / 4u);
-    const uint16_t quiet = static_cast<uint16_t>(
-        (sample[quiet_start] + sample[quiet_start+1] +
-         sample[quiet_start+2] + sample[quiet_start+3] +
-         sample[quiet_start+4]) / 5u);
-    const uint32_t threshold = aggressive_ ? 
-        (static_cast<uint32_t>(quiet) * 3u / 2u + 4u) :  // aggressive: 1.5x + 4
-        (static_cast<uint32_t>(quiet) * 2u + 8u);       // normal: 2x + 8
-    if (pulse <= threshold) continue;
-    ++stats_.preambles;
+  /* --- preamble detection + multi-phase slicing (readsb demodulate2400) --- */
+  const uint32_t threshold = preamble_threshold_;
+  /* Trailing samples needed for the slicer past the last preamble candidate. */
+  const size_t need = kMaxFrameSamples + 24;
+  if (count > need) {
+    const size_t last = count - need;
+    for (size_t pos = 0; pos <= last; ++pos) {
+      const uint16_t* pa = magnitudes_ + pos;
+      if (!(pa[1] > pa[7] && pa[12] > pa[14] && pa[12] > pa[15])) continue;
 
-    ++stats_.frames;
-    Frame decoded{};
-    bool valid = false;
-    bool saw_df17 = false;
-    uint8_t valid_bits = 0;
-    for (size_t first_center = first_center_min; first_center <= first_center_max; first_center += 100) {
-      uint8_t frame[14]{};
-      for (int bit = 0; bit < 112; ++bit) {
-        const size_t center = first_center + static_cast<size_t>(bit) * bit_spacing;
-        if (interpolate(sample, center) > interpolate(sample, center + half_bit_spacing))
-          frame[bit / 8] |= static_cast<uint8_t>(0x80u >> (bit % 8));
-      }
-      const uint8_t df = frame[0] >> 3;
-      saw_df17 |= df == 17;
-      const uint8_t frame_bits = df == 11 ? 56 : 112;
-      if (parse(frame, frame_bits, pulse - quiet, &decoded)) {
-        valid = true;
-        valid_bits = frame_bits;
-        break;
-      }
-      if (crc_fix_enabled_) {
-        uint8_t frame_copy[14];
-        std::memcpy(frame_copy, frame, frame_bits / 8);
-        if (try_crc_fix(frame_copy, frame_bits, &decoded)) {
-          valid = true;
-          valid_bits = frame_bits;
-          break;
+      const int base_noise = static_cast<int>(pa[5]) + pa[8] + pa[16] + pa[17] + pa[18];
+      const int ref_level = static_cast<int>((static_cast<int64_t>(base_noise) * threshold) >> 5);
+
+      const int diff_2_3 = static_cast<int>(pa[2]) - pa[3];
+      const int sum_1_4 = static_cast<int>(pa[1]) + pa[4];
+      const int diff_10_11 = static_cast<int>(pa[10]) - pa[11];
+      const int common3456 = sum_1_4 - diff_2_3 + pa[9] + pa[12];
+
+      Frame best{};
+      int best_bit_length = 0;
+      bool have_candidate = false;
+
+      auto score_phase = [&](int try_phase) {
+        const uint16_t* pPtr = pa + 19 + (try_phase / 5);
+        int phase = try_phase % 5;
+        uint8_t msg[14]{};
+        msg[0] = slice_byte(&pPtr, &phase);
+        const uint32_t df = msg[0] >> 3;
+        uint32_t bytelen;
+        if (valid_df_long_bitset & (1u << df)) {
+          bytelen = kModesLongMsgBytes;
+        } else if (valid_df_short_bitset & (1u << df)) {
+          bytelen = kModesShortMsgBytes;
+        } else {
+          return;
         }
-      }
+        for (uint32_t i = 1; i < bytelen; ++i) msg[i] = slice_byte(&pPtr, &phase);
+
+        uint8_t frame_copy[14];
+        std::memcpy(frame_copy, msg, bytelen);
+        Frame decoded{};
+        if (!parse(frame_copy, bytelen * 8, 0, &decoded)) {
+          if (!crc_fix_enabled_) return;
+          std::memcpy(frame_copy, msg, bytelen);
+          if (!try_crc_fix(frame_copy, bytelen * 8, &decoded)) return;
+        }
+        if (have_candidate && best_bit_length >= static_cast<int>(bytelen * 8)) return;
+        best = decoded;
+        best_bit_length = static_cast<int>(bytelen * 8);
+        have_candidate = true;
+      };
+
+      int pa_mag = common3456 - diff_10_11;
+      if (pa_mag >= ref_level) { score_phase(4); score_phase(5); }
+      pa_mag = common3456 + diff_10_11;
+      if (pa_mag >= ref_level) { score_phase(6); score_phase(7); }
+      pa_mag = sum_1_4 + 2 * diff_2_3 + diff_10_11 + pa[12];
+      if (pa_mag >= ref_level) score_phase(8);
+
+      if (!have_candidate) continue;
+      ++stats_.preambles;
+      ++stats_.frames;
+      const uint8_t df = best.bytes[0] >> 3;
+      if (df == 17) ++stats_.df17;
+      ++stats_.crc_ok;
+      if (callback) callback(best, context);
+      /* Skip most of the message so we don't re-decode it at every bit
+       * offset (readsb: pa += msglen * 8 / 4). */
+      pos += (best_bit_length == 112 ? 224u : 112u) - 1;
     }
-    if (saw_df17) ++stats_.df17;
-    if (!valid) continue;
-    ++stats_.crc_ok;
-    if (callback) callback(decoded, context);
-    pos += (valid_bits == 56 ? 131 : kFrameSamples) - 1;
   }
-  overlap_ = std::min(count, kFrameSamples);
+
+  overlap_ = std::min(count, kTrailingSamples);
   std::memmove(magnitudes_, magnitudes_ + count - overlap_, overlap_ * sizeof(uint16_t));
 }
 
@@ -360,9 +424,13 @@ bool Decoder::self_check() {
          parse(all_call, 56, 1, &short_reply) && short_reply.bit_length == 56 &&
          short_reply.icao == 0x4840d6))
     return false;
-  // Note: live_magnitudes test skipped for 2.4 MSPS (test vectors are for 2.048 MSPS)
-  // Basic parse/CRC/CPR logic validated above; live decode works in practice.
-return true;
+  /* The IQ->bits->frame path is validated offline against a real 30 s
+   * 2.4 MSPS capture (650 CRC / 289 distinct aircraft vs readsb 883 / 419);
+   * see verify_port harness + docs/LEARNING.md L28. It is deliberately not
+   * re-run here: a synthetic-waveform test needs bit-exact sample alignment
+   * with the 5-phase slicer and would make boot self_check fragile.
+   * Below are the deterministic parse/CRC/CPR unit checks. */
+  return true;
 }
 
 }  // namespace adsb_radar::adsb_rx
