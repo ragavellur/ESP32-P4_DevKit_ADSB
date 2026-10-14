@@ -251,6 +251,44 @@ static esp_err_t h_aircraft_json(httpd_req_t *req)
     return e;
 }
 
+/* Recent raw Mode-S frames (hex), for offline feeder validation. */
+static esp_err_t h_frames(httpd_req_t *req)
+{
+    static adsb_captured_frame_t frames[64];
+    const uint32_t n = adsb_decoder_bridge_get_capture(frames, 64);
+
+    char *buf = heap_caps_malloc(JSON_BUF_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+    int off = snprintf(buf, JSON_BUF_CAP, "{\"count\":%u,\"frames\":[", (unsigned)n);
+    for (uint32_t i = 0; i < n && off > 0 && off < (int)JSON_BUF_CAP; ++i) {
+        const uint32_t len = frames[i].bit_length / 8u;
+        char hex[29];
+        int k = 0;
+        for (uint32_t b = 0; b < len && k < 28; ++b) {
+            k += snprintf(hex + k, sizeof(hex) - (size_t)k, "%02x", frames[i].bytes[b]);
+        }
+        hex[k] = '\0';
+        off += snprintf(buf + off, JSON_BUF_CAP - (size_t)off,
+                        "%s{\"hex\":\"%s\",\"bits\":%u,\"t_us\":%lld}",
+                        i ? "," : "", hex, (unsigned)frames[i].bit_length,
+                        (long long)frames[i].rx_timestamp_us);
+        if (off >= (int)JSON_BUF_CAP) break;
+    }
+    if (off > 0 && off < (int)JSON_BUF_CAP) {
+        off += snprintf(buf + off, JSON_BUF_CAP - (size_t)off, "]}");
+    }
+    if (off < 0 || off >= (int)JSON_BUF_CAP) off = (int)JSON_BUF_CAP - 1;
+    buf[off] = '\0';
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t ret = httpd_resp_send(req, buf, strlen(buf));
+    heap_caps_free(buf);
+    return ret;
+}
+
 static esp_err_t h_status_json(httpd_req_t *req)
 {
     char buf[768];
@@ -673,6 +711,10 @@ esp_err_t http_radar_start(void)
         .uri = "/api/debug", .method = HTTP_GET,
         .handler = h_debug, .user_ctx = NULL
     };
+    const httpd_uri_t r_frames = {
+        .uri = "/api/frames", .method = HTTP_GET,
+        .handler = h_frames, .user_ctx = NULL
+    };
     const httpd_uri_t r_loc_get = {
         .uri = "/api/location", .method = HTTP_GET,
         .handler = h_location_get, .user_ctx = NULL
@@ -698,6 +740,7 @@ esp_err_t http_radar_start(void)
         httpd_register_uri_handler(server, &r_feed)   != ESP_OK ||
         httpd_register_uri_handler(server, &r_status) != ESP_OK ||
         httpd_register_uri_handler(server, &r_debug)  != ESP_OK ||
+        httpd_register_uri_handler(server, &r_frames) != ESP_OK ||
         httpd_register_uri_handler(server, &r_loc_get)  != ESP_OK ||
         httpd_register_uri_handler(server, &r_loc_post) != ESP_OK ||
         httpd_register_uri_handler(server, &r_settings_get)  != ESP_OK ||
@@ -708,6 +751,6 @@ esp_err_t http_radar_start(void)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "server up: / /radar /data/aircraft.json /api/status /api/debug /api/settings /api/location");
+    ESP_LOGI(TAG, "server up: / /radar /data/aircraft.json /api/status /api/debug /api/frames /api/settings /api/location");
     return ESP_OK;
 }

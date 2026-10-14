@@ -2,6 +2,7 @@
 #include <stdio.h>
 
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "adsb_decoder_bridge.h"
 #include "adsb_decoder.hpp"
 
@@ -22,6 +23,21 @@ static uint32_t s_app_df17 = 0;
 static uint32_t s_app_crc_ok = 0;
 static adsb_frame_hook_t s_hook = nullptr;
 static void* s_hook_ctx = nullptr;
+
+/* Recent-frame capture ring.
+ *
+ * Lets /api/frames serve raw Mode-S frames captured from REAL device IQ, so
+ * the feeder can be validated byte-for-byte against the reference Python
+ * implementation (br_feeder.py / br_bridge.py) before any C code is trusted
+ * against the live hub. Written on the decode hot path with no allocation. */
+static constexpr size_t kCaptureDepth = 64;
+static struct {
+    uint8_t bytes[14];
+    uint8_t bit_length;
+    int64_t rx_timestamp_us;
+} s_capture[kCaptureDepth];
+static volatile uint32_t s_capture_head = 0;
+static volatile uint32_t s_capture_total = 0;
 
 static void on_frame(const Frame &frame, void *ctx)
 {
@@ -65,6 +81,20 @@ static void on_frame(const Frame &frame, void *ctx)
         f.cpr_odd = frame.cpr_odd;
         f.has_cpr = frame.has_cpr;
         f.signal = frame.signal;
+        /* Raw frame for the feeder. Frame.bytes holds exactly bit_length/8
+         * bytes and is already CRC-corrected when crc_fix is on, so this is
+         * what a reference decoder (readsb/dump1090) would emit. */
+        memcpy(f.bytes, frame.bytes, sizeof(f.bytes));
+        f.bit_length = frame.bit_length;
+        f.rx_timestamp_us = (int64_t)esp_timer_get_time();
+        {
+            const uint32_t slot = s_capture_head % kCaptureDepth;
+            memcpy(s_capture[slot].bytes, frame.bytes, sizeof(f.bytes));
+            s_capture[slot].bit_length = frame.bit_length;
+            s_capture[slot].rx_timestamp_us = f.rx_timestamp_us;
+            s_capture_head = slot + 1;
+            s_capture_total = s_capture_total + 1;
+        }
         s_hook(&f, s_hook_ctx);
     }
 }
@@ -103,6 +133,31 @@ void adsb_decoder_bridge_reset(void)
     s_app_frames = 0;
     s_app_df17 = 0;
     s_app_crc_ok = 0;
+    s_capture_head = 0;
+    s_capture_total = 0;
+    memset(s_capture, 0, sizeof(s_capture));
+}
+
+uint32_t adsb_decoder_bridge_get_capture(adsb_captured_frame_t *out, uint32_t cap)
+{
+    if (out == nullptr || cap == 0) {
+        return 0;
+    }
+    /* Snapshot the head once so a concurrent push cannot make us read a torn
+     * slot; entries older than the newest `cap` are simply skipped. */
+    const uint32_t head = s_capture_head;
+    const uint32_t total = s_capture_total;
+    const uint32_t available = (total < kCaptureDepth) ? total : (uint32_t)kCaptureDepth;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < available && n < cap; ++i) {
+        /* Walk oldest -> newest. */
+        const uint32_t idx = (head - available + i) % kCaptureDepth;
+        out[n].bit_length = s_capture[idx].bit_length;
+        out[n].rx_timestamp_us = s_capture[idx].rx_timestamp_us;
+        memcpy(out[n].bytes, s_capture[idx].bytes, sizeof(out[n].bytes));
+        ++n;
+    }
+    return n;
 }
 
 void adsb_decoder_bridge_process(const uint8_t *cu8, size_t bytes)
