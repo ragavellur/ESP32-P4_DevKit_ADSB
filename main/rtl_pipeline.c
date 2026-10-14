@@ -152,6 +152,11 @@ typedef struct {
     uint32_t base60_df17;
     uint32_t base60_bytes;
     uint32_t win60_uptime_ms;
+    /* adsb_dsp CPU accounting (DSP task writes, status task snapshots). */
+    volatile uint64_t dsp_busy_us;
+    volatile uint64_t dsp_samples;
+    uint64_t base60_dsp_busy_us;
+    uint64_t base60_dsp_samples;
 } rtl_ctx_t;
 
 static rtl_ctx_t s_ctx;
@@ -508,6 +513,7 @@ static void adsb_decoder_task(void *arg)
 
     for (;;) {
         uint32_t idx;
+        const int64_t t_start = esp_timer_get_time();
         if (xQueueReceive(s_ctx.filled_q, &idx, portMAX_DELAY) != pdTRUE) {
             continue;
         }
@@ -516,6 +522,11 @@ static void adsb_decoder_task(void *arg)
             adsb_decoder_bridge_process(slot->data, slot->bytes);
         }
         xQueueSend(s_ctx.free_q, &idx, 0);
+        /* Accumulate decode busy time + processed samples so /api/debug can
+         * report whether adsb_dsp is CPU-saturated (busy% near 100% and
+         * ring_free pinned at 0 means IQ is being dropped before decode). */
+        s_ctx.dsp_busy_us += (uint64_t)(esp_timer_get_time() - t_start);
+        s_ctx.dsp_samples += (uint64_t)(slot->bytes / 2u);
     }
 }
 
@@ -560,6 +571,8 @@ static void status_task(void *arg)
                 s_ctx.base60_df17 = ds.decoder_df17;
                 s_ctx.base60_bytes = s_ctx.metrics.bytes_total;
                 s_ctx.win60_uptime_ms = now_ms_ - last_uptime_ms;
+                s_ctx.base60_dsp_busy_us = s_ctx.dsp_busy_us;
+                s_ctx.base60_dsp_samples = s_ctx.dsp_samples;
                 last_uptime_ms = now_ms_;
             }
             if (last_uptime_ms == 0) {
@@ -856,6 +869,12 @@ void rtl_pipeline_get_debug(rtl_pipeline_debug_t *out)
     if (span > 0) {
         out->win60_effective_sps = (uint32_t)(((uint64_t)out->win60_bytes * 500ull) /
                                              ((uint64_t)span * 1000ull));
+        const uint64_t busy_us = (s_ctx.dsp_busy_us >= s_ctx.base60_dsp_busy_us)
+                                     ? s_ctx.dsp_busy_us - s_ctx.base60_dsp_busy_us : 0;
+        const uint64_t samples = (s_ctx.dsp_samples >= s_ctx.base60_dsp_samples)
+                                     ? s_ctx.dsp_samples - s_ctx.base60_dsp_samples : 0;
+        out->dsp_busy_pct = (float)((double)busy_us / ((double)span * 1000.0 * 1000.0) * 100.0);
+        out->dsp_samples_per_s = (float)((double)samples / (double)span);
     }
 
     out->programmed_sps = s_settings.sample_rate_sps;

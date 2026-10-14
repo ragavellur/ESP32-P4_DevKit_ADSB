@@ -188,7 +188,8 @@ static esp_err_t h_debug(httpd_req_t *req)
         "\"sample_max\":%u},"
         "\"health\":{\"usb\":%u,\"rf\":%u,\"overall\":%u,"
         "\"efficiency\":%.3f,\"advice\":\"%s\"},"
-        "\"pipe\":{\"overruns\":%lu,\"drops\":%lu,\"ring_free\":%lu}}",
+        "\"pipe\":{\"overruns\":%lu,\"drops\":%lu,\"ring_free\":%lu},"
+        "\"dsp\":{\"busy_pct\":%.1f,\"samples_per_s\":%.0f,\"required_sps\":%lu}}",
         (unsigned long long)(esp_timer_get_time() / 1000),
         st.phase == RTL_PIPELINE_STREAMING ? "streaming" :
         st.phase == RTL_PIPELINE_OPTAINING ? "obtaining" :
@@ -213,7 +214,9 @@ static esp_err_t h_debug(httpd_req_t *req)
         (unsigned)d.health_usb, (unsigned)d.health_rf, (unsigned)d.health_overall,
         (double)d.health_efficiency, d.advice,
         (unsigned long)st.overrun_cnt, (unsigned long)st.consumer_drops,
-        (unsigned long)st.ring_free_slots);
+        (unsigned long)st.ring_free_slots,
+        (double)d.dsp_busy_pct, (double)d.dsp_samples_per_s,
+        (unsigned long)d.programmed_sps);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

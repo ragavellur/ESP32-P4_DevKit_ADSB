@@ -85,6 +85,10 @@ typedef struct {
     uint32_t win60_df17;
     uint32_t win60_bytes;
     uint32_t win60_effective_sps;
+    /* adsb_dsp CPU load over the same window. busy_pct near 100 means the
+     * decoder is saturated and IQ is being dropped before it is decoded. */
+    float dsp_busy_pct;
+    float dsp_samples_per_s;
     /* Tunables / config actually in effect */
     uint32_t programmed_sps;
     uint32_t preamble_threshold;
