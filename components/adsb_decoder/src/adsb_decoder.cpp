@@ -279,6 +279,12 @@ inline uint8_t slice_byte(const uint16_t** pPtr, int* phase) {
 uint32_t valid_df_short_bitset = 0;
 uint32_t valid_df_long_bitset = 0;
 
+/* AMB (alpha max plus beta min) magnitude scale: AMB of a full-scale sample is
+ * 127 + 127/4 = 158; 65535/158 ~= 415 so full scale maps to ~65535, the unit
+ * range the readsb slice_phase0..4 correlations and the noise-adaptive
+ * preamble threshold are expressed in. */
+constexpr int kAmbScale = 415;
+
 void init_bitsets_once() {
   if (valid_df_short_bitset != 0) return;
   /* DFs understood without correction. */
@@ -292,7 +298,28 @@ void Decoder::process_pairs(const uint8_t* data, size_t pairs, FrameCallback cal
                             void* context) {
   init_bitsets_once();
 
-  /* --- magnitude: readsb uc8 conversion (linear amplitude, 1 Hz DC high-pass) --- */
+  /* --- magnitude: readsb uc8 conversion (linear amplitude, 1 Hz DC high-pass) ---
+   *
+   * readsb computes mag = sqrt((I-127.5)^2+(Q-127.5)^2)/127.5 * 65535 via a
+   * 256x256 lookup table. That costs a sqrt or a cache-missing table probe per
+   * sample - ~2.4 M/s - and it is what limits us to ~76% of the incoming
+   * stream (LEARNING L30).
+   *
+   * We use the Alpha Max Plus Beta Min approximation instead:
+   *     mag ~= max(|I|,|Q|) + min(|I|,|Q|)/4
+   * Integer-only, branch-light, within ~4% of true sqrt over the range the
+   * preamble detector cares about. Crucially it stays CONTINUOUS in the input,
+   * so weak signals keep enough magnitude resolution to resolve preamble peaks -
+   * unlike a coarse sqrt lookup table, which quantised weak blocks to a handful
+   * of levels and decoded nothing (the mag_max=1028 failure).
+   *
+   * The DC high-pass stays float: its coefficient exp(-2*pi/sr) ~= 2.6e-6 is
+   * far too small for an integer shift without the accumulator stalling. It is
+   * two multiply-adds, not the bottleneck.
+   *
+   * Normalised so a full-scale sample gives ~65535, matching the magnitude units
+   * the readsb slicers and the preamble threshold expect.
+   */
   const float inv = 1.0f / 127.5f;
   if (dc_filter_enabled_) {
     /* readsb: dc_b = exp(-2*pi*1.0/sample_rate); dc_a = 1 - dc_b */
@@ -309,9 +336,17 @@ void Decoder::process_pairs(const uint8_t* data, size_t pairs, FrameCallback cal
       fI -= dc_z1_i_;
       fQ -= dc_z1_q_;
     }
-    float magsq = fI * fI + fQ * fQ;
-    if (magsq > 1.0f) magsq = 1.0f;
-    const uint16_t mag = static_cast<uint16_t>(std::sqrt(magsq) * 65535.0f + 0.5f);
+    /* Alpha Max Plus Beta Min on the DC-corrected amplitude, in integer math.
+     * ai/aq are in [-128,127]; AMB is in [0,255]. kAmbScale maps full-scale
+     * to ~65535 to match the units the readsb slicers expect. */
+    int ai = static_cast<int>(fI * 127.5f);
+    int aq = static_cast<int>(fQ * 127.5f);
+    const int abs_i = ai < 0 ? -ai : ai;
+    const int abs_q = aq < 0 ? -aq : aq;
+    const int hi = abs_i > abs_q ? abs_i : abs_q;
+    const int lo = abs_i > abs_q ? abs_q : abs_i;
+    const int amb = hi + (lo >> 2);
+    const uint16_t mag = static_cast<uint16_t>(amb * kAmbScale);
     stats_.magnitude_min = std::min(stats_.magnitude_min, mag);
     stats_.magnitude_max = std::max(stats_.magnitude_max, mag);
     magnitudes_[count++] = mag;
