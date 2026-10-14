@@ -24,6 +24,8 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_event.h"
+#include "esp_netif.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -285,6 +287,23 @@ static volatile uint32_t s_frames_sent = 0;
 static volatile uint32_t s_reconnects = 0;
 static volatile int s_last_error = 0;
 
+/* Set once the stack has an IP.
+ *
+ * CRITICAL: lwIP's getaddrinfo() posts to the tcpip thread and asserts
+ * (`tcpip_send_msg_wait_sem ... Invalid mbox`) if the thread is not running
+ * yet. Calling it before Ethernet is up therefore panics the chip on boot and,
+ * because the feeder retries, produces an unbreakable reboot loop. Never
+ * resolve a hostname until this flag is set. */
+static volatile bool s_net_ready = false;
+
+static void feeder_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg; (void)base; (void)data;
+    if (id == IP_EVENT_ETH_GOT_IP || id == IP_EVENT_STA_GOT_IP) {
+        s_net_ready = true;
+    }
+}
+
 static int feeder_connect(void)
 {
     struct addrinfo hints = {0};
@@ -360,6 +379,11 @@ static void feeder_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
+        /* Hard gate: no hostname resolution until lwIP has an IP. */
+        if (!s_net_ready) {
+            vTaskDelay(pdMS_TO_TICKS(200));
+            continue;
+        }
         if (fd < 0) {
             fd = feeder_connect();
             if (fd < 0) {
@@ -408,6 +432,14 @@ esp_err_t beast_feeder_start(void)
     ESP_LOGI(TAG, "start: enabled=%d uuid=%s host=%s port=%u",
              (int)s_cfg.enabled, s_cfg.uuid[0] ? s_cfg.uuid : "(unset)", s_cfg.host,
              (unsigned)s_cfg.port);
+
+    /* Must be called after esp_event_loop_create_default() (eth_netif_start). */
+    esp_err_t ev = esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_ETH_GOT_IP, feeder_ip_event, NULL, NULL);
+    if (ev != ESP_OK) {
+        ESP_LOGW(TAG, "IP event register failed (%s); feeder waits on link",
+                 esp_err_to_name(ev));
+    }
 
     /* Core 0, prio 3: strictly below adsb_dsp (core 1, prio 6). */
     BaseType_t ok = xTaskCreatePinnedToCore(feeder_task, "beast_feed", 6144, NULL, 3,

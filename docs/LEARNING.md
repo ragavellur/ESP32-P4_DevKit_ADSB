@@ -405,3 +405,37 @@ treat `uri registration failed` as a route-count problem first. When the device
 behaves normally over USB but the browser cannot connect, read the serial log
 *before* blaming Ethernet or DHCP — the failure here was a one-line config
 value, and the boot log named it outright.
+
+## L33 — `getaddrinfo()` before lwIP is up = boot loop (feeder crash)
+
+The BharatRadar feeder was started from `app_main()` **before**
+`eth_netif_start()`. lwIP's `getaddrinfo()` posts a message to the tcpip thread
+and asserts if that thread does not exist yet:
+
+```
+assert failed: tcpip_send_msg_wait_sem /lwip/src/api/tcpip.c:454 (Invalid mbox)
+```
+
+The chip panics, reboots, and on the next boot the feeder calls `getaddrinfo()`
+again *before the network is up* -> panic again. **Unbreakable reboot loop**,
+because the feeder config is persisted in NVS, so the path re-triggers on every
+single boot. The unit looked dead: no web UI, no Ethernet, and it never stayed up
+long enough to be rescued without a reflash.
+
+**Why it survived testing:** the feeder was enabled at *runtime* over
+`/api/feeder`, never at boot. Every test ran with `enabled=0` in NVS, so the
+crash path was never exercised until a unit rebooted with the feeder already on.
+
+**Fix:** wait for `IP_EVENT_ETH_GOT_IP` before resolving anything, and start the
+feeder task after `eth_netif_start()`:
+
+```c
+if (!s_net_ready) { vTaskDelay(pdMS_TO_TICKS(200)); continue; }  /* before connect */
+...
+esp_event_handler_instance_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, ...);
+```
+
+**Rule:** anything touching lwIP (DNS, sockets) must be gated on the stack being
+up. Treat boot-time behaviour of *persisted* config as a separate test from the
+feature itself -- a change verified only at runtime has an entire untested class
+of failures, all of which fire on the next power cycle.

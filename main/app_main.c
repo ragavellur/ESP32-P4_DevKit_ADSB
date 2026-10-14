@@ -31,13 +31,6 @@ void app_main(void)
         ESP_LOGE(TAG, "rtl_pipeline_init failed: %s", esp_err_to_name(ret));
     }
 
-    /* BharatRadar feeder. Started here (after NVS init) but it waits for the
-     * network and reconnects with backoff, so Ethernet need not be up yet. */
-    ret = beast_feeder_start();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "beast_feeder_start failed: %s", esp_err_to_name(ret));
-    }
-
     #ifdef CONFIG_ADSB_RADAR_ETH
     ret = eth_netif_start();
     if (ret != ESP_OK) {
@@ -46,4 +39,13 @@ void app_main(void)
 #else
     ESP_LOGW(TAG, "Ethernet netif disabled (CONFIG_ADSB_RADAR_ETH=n)");
 #endif
+
+    /* BharatRadar feeder. MUST start after eth_netif_start(): lwIP asserts if
+     * getaddrinfo() runs before the tcpip thread exists, which panics the chip
+     * into a reboot loop (LEARNING L33). It still waits for an actual IP before
+     * resolving, and reconnects with backoff. */
+    ret = beast_feeder_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "beast_feeder_start failed: %s", esp_err_to_name(ret));
+    }
 }

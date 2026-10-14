@@ -199,3 +199,18 @@ like a network fault. Raised to 16.
 **Open:** (a) tuner warm-up — IQ collapses to a ~6-count swing after 1-2 min of
 streaming and recovers on reset; (b) local track count exceeds the map count
 (9 vs 6), to be investigated next.
+
+## 2026-10-14 — Feeder boot-loop hotfix (L33)
+
+`v0.5.0` shipped a crash on boot. `beast_feeder_start()` ran before
+`eth_netif_start()`, so lwIP's `getaddrinfo()` asserted (`Invalid mbox`) because
+the tcpip thread did not exist yet. Panic -> reboot -> retry -> panic. Because
+the feeder UUID lives in NVS, every boot re-entered the failing path, producing
+an unbreakable loop with no web UI and no Ethernet.
+
+It passed testing only because the feeder had always been enabled at runtime
+over HTTP; a cold boot with it already persisted was never tested (L33).
+
+Fix: gate resolution on `IP_EVENT_ETH_GOT_IP` and start the feeder after
+`eth_netif_start()`. Verified stable (0 reboots in 20 s, feeder connected,
+decode healthy). Shipped as `v0.5.1-feeder-bootloop-fix`.
