@@ -222,9 +222,8 @@
             </label>
         </div>
         <div class="control-row"><span>Sample Rate (SPS):</span>
-            <select id="setSampleRate">
-                <option value="2048000">2048000 (2.048 MSPS)</option>
-                <option value="2400000">2400000 (2.4 MSPS)</option>
+            <select id="setSampleRate" disabled title="Fixed: 2.048 MSPS decodes zero messages on this tuner (verified against readsb)">
+                <option value="2400000" selected>2400000 (2.4 MSPS)</option>
             </select>
         </div>
         <div style="border-top: 1px dashed #004400; margin: 10px 0 8px; padding-top: 8px;">BharatRadar Feeder</div>
@@ -803,6 +802,23 @@
         };
     })();
 
+    // The firmware accepts ONLY 2400000 and rejects anything else with 400,
+// which would fail the *entire* settings save. Never let a stale DOM value
+// (or a saved page) send anything else. See LEARNING L36.
+const FIXED_SAMPLE_RATE = 2400000;
+
+function settingsPayload() {
+    return {
+        gain: parseInt(settingsForm.gain.value),
+        dc_filter: settingsForm.dcFilter.checked,
+        adaptive_gain: parseInt(settingsForm.gainMode.value, 10) === 1,
+        gain_mode: parseInt(settingsForm.gainMode.value, 10),
+        aggressive: settingsForm.aggressive.checked,
+        crc_fix: settingsForm.crcFix.checked,
+        sample_rate_sps: FIXED_SAMPLE_RATE
+    };
+}
+
     async function loadSettings() {
         try {
             const r = await fetch("/api/settings");
@@ -829,16 +845,7 @@
     }
 
     async function saveSettings() {
-        const gainMode = parseInt(settingsForm.gainMode.value, 10);
-        const body = {
-            gain: parseInt(settingsForm.gain.value),
-            dc_filter: settingsForm.dcFilter.checked,
-            adaptive_gain: gainMode === 1,
-            gain_mode: gainMode,
-            aggressive: settingsForm.aggressive.checked,
-            crc_fix: settingsForm.crcFix.checked,
-            sample_rate_sps: parseInt(settingsForm.sampleRate.value)
-        };
+        const body = settingsPayload();
         try {
             const r = await fetch("/api/settings", {
                 method: "POST",
@@ -1047,17 +1054,17 @@ function evaluateAlerts(s) {
             fixText: "Raise gain to " + tenthsToDb(t) + " dB" + (gain != null ? " (now " + tenthsToDb(gain) + " dB)" : "") + "." });
     }
     if (streaming && overruns > 0) {
+        /* The sample rate is fixed at 2.4 MSPS (2.048 decodes nothing on this
+         * tuner), so lowering the rate is NOT an available remedy here. */
         alerts.push({ key: "usb", icon: "!", title: "USB OVERRUN",
             desc: "The USB link cannot sustain the streamed rate; samples are lost before they reach the decoder.",
-            fix: rate > 2048000 ? { sample_rate_sps: 2048000 } : null,
-            fixText: rate > 2048000 ? "Drop the sample rate to 2048000 SPS."
-                                    : "Rate is already at the lowest option — this points to a USB host/hub problem." });
+            fix: null,
+            fixText: "The sample rate is already at the only usable value. This points to a USB host/hub problem — try a direct USB port, a shorter cable, or a powered hub." });
     }
     if (streaming && drops > 0) {
         let fix = null, txt;
-        if (rate > 2048000) { fix = { sample_rate_sps: 2048000 }; txt = "Drop the sample rate to 2048000 SPS."; }
-        else if (gain != null) { fix = { gain: Math.max(0, gain - 30), gain_mode: 0 }; txt = "Lower gain by 3 dB to cut false preambles and free up decode time."; }
-        else { txt = "The decoder cannot keep up at this rate."; }
+        if (gain != null) { fix = { gain: Math.max(0, gain - 30), gain_mode: 0 }; txt = "Lower gain by 3 dB to cut false preambles and free up decode time."; }
+        else { txt = "The decoder cannot keep up. The sample rate is already at its only usable value."; }
         alerts.push({ key: "drops", icon: "!", title: "DECODER OVERLOAD (frames dropped)",
             desc: "The IQ ring is overflowing because the decoder cannot keep up, so whole blocks of samples are being discarded.",
             fix: fix, fixText: txt });
@@ -1119,19 +1126,15 @@ function dismissAlert() {
 async function applyAlertFix() {
     if (!currentAlert || !currentAlert.fix) return;
     const body = {
-        gain: parseInt(settingsForm.gain.value),
-        dc_filter: settingsForm.dcFilter.checked,
-        gain_mode: parseInt(settingsForm.gainMode.value, 10),
-        adaptive_gain: parseInt(settingsForm.gainMode.value, 10) === 1,
-        aggressive: settingsForm.aggressive.checked,
-        crc_fix: settingsForm.crcFix.checked,
-        sample_rate_sps: parseInt(settingsForm.sampleRate.value)
+        ...settingsPayload(),
     };
     Object.assign(body, currentAlert.fix);
     if (currentAlert.fix.gain_mode !== undefined) {
         body.gain_mode = currentAlert.fix.gain_mode;
         body.adaptive_gain = currentAlert.fix.gain_mode === 1;
     }
+    // An alert fix must never reintroduce a rejected sample rate.
+    body.sample_rate_sps = FIXED_SAMPLE_RATE;
     // Reflect the intended change in the settings form so it is visible.
     settingsForm.gain.value = body.gain;
     settingsForm.gainMode.value = String(body.gain_mode);

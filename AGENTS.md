@@ -149,3 +149,18 @@ committed, or pasted into issue/PR text. Use environment variables or local-only
 - `docs/IMPLEMENTATION_PLAN.md` — architecture and component design
 - `docs/TASKS_TRACKER.md` — current phase/task status and platform notes
 - `docs/LEARNING.md` — read this first; it will save you hours
+
+### 5.2a UI/API contract check (run before every flash)
+
+The §5.2 checks verify the UI is *syntactically* valid. They cannot catch a UI
+that is syntactically perfect but offers a value the firmware rejects — which is
+how a 2.048 MSPS option survived to a 400 in the field (LEARNING.md L36).
+
+```sh
+python3 tests/web/check_ui_api.py
+```
+
+This cross-checks every value the UI can send against the constraints enforced in
+`main/http_radar.c` (sample rate, gain range) and re-runs the HTML/duplicate-id
+checks. **Run it before `node --check`.** Extend it whenever a new API
+validation rule is added, otherwise the UI can drift from the API silently.
