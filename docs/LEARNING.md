@@ -439,3 +439,32 @@ esp_event_handler_instance_register(IP_EVENT, IP_EVENT_ETH_GOT_IP, ...);
 up. Treat boot-time behaviour of *persisted* config as a separate test from the
 feature itself -- a change verified only at runtime has an entire untested class
 of failures, all of which fire on the next power cycle.
+
+## L34 — Know the licence boundary before shipping, not after
+
+Auditing provenance for the README turned up two things that are easy to get
+wrong when you assume (as I did) rather than check:
+
+1. **`components/esp_rtl_sdr/` is AGPL-3.0**, vendored from a separate upstream
+   project. Its own header states it is a **clean-room implementation, not a
+   librtlsdr port** — so my initial assumption that it was "adapted from
+   librtlsdr" was simply wrong. The real constraint is AGPL, whose §13 network
+   clause is the part that matters here: users interacting with the device over
+   the web UI are "interacting with it remotely through a computer network",
+   which is precisely the situation AGPL §13 addresses.
+
+2. **`components/adsb_decoder/` is our own code, but the algorithm is ported
+   from readsb, which is GPL-3.0.** Writing fresh code against a published
+   algorithm is not the same act as copying source, but it is exactly the
+   situation where a licence claim is worth making deliberately rather than
+   hoping it is fine.
+
+**Lesson:** "we wrote it" and "we can ship it however we like" are different
+claims. Porting an algorithm is not copying code, and a vendored component is
+not your code even when it lives in your tree and your git history.
+
+**Rule:** before distributing — especially a firmware binary or a product —
+check the actual `LICENSE` files in-tree rather than reasoning from memory.
+Run `find . -iname LICENSE -not -path ./build/*`. The header comments in a
+component are often more accurate about origin than whatever you assumed
+when you added it.
