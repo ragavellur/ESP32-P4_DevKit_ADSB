@@ -322,3 +322,59 @@ Cause: firmware is built with `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` → **`-Og`
 translation unit, including the per-sample DSP loop. Deliberately left as-is for now
 (whole-firmware optimisation is a separate, separately-measured change), but it is the
 leading suspect for the decode-rate variance between ~0.7/s and ~5/s.
+
+## L31. Per-sample sqrt was the throughput ceiling; AMB fixed it (+152% CRC rate)
+
+After the 2.4 MSPS fix, `/api/debug` showed `adsb_dsp` processing only
+`samples_per_s=576,717` against `required_sps=2,400,000` - **~24% of the stream**,
+with the rest discarded by the ring (`busy_pct` ~40-88%). The per-sample
+magnitude was the dominant cost:
+
+```c
+float magsq = fI*fI + fQ*fQ;
+mag = std::sqrt(magsq) * 65535.0f;   // ~2.4 M sqrt/s
+```
+
+On x86 that is one `sqrtsd`; on the ESP32-P4's **RV32F it is a microcoded software
+routine** (a `call sqrt`), so the cost is far higher there. Confirmed by compiling
+for `rv32imafc`: the per-sample path compiles to a library call.
+
+Replaced with **Alpha Max Plus Beta Min**, integer-only:
+
+```
+mag ~= max(|I|,|Q|) + min(|I|,|Q|)/4      scaled x415 -> full scale ~= 65535
+```
+
+The scale is chosen so the magnitude stays in the **same unit range** the readsb
+`slice_phase0..4` correlations and the noise-adaptive preamble threshold are
+expressed in - so **no slicer re-tuning was needed**.
+
+**Measured on hardware** (192.168.1.6, 42.1 dB manual, 2-minute average):
+
+| metric | before | after |
+|---|---|---|
+| CRC rate | 11.00/s | **27.72/s** (+152%) |
+| samples_per_s | 576,717 | **1,139,780** (+98%) |
+| share of stream | ~24% | ~47% |
+| overruns / tracks | 0 / 19 | 0 / 19 (held) |
+
+**Validate the magnitude path across WEAK signals, not just a strong capture.**
+The earlier `int-sqrt` lookup table (L-less, reverted) passed on the full-strength
+capture and then decoded **nothing** at weak signal - a coarse table quantised weak
+blocks to ~5 distinct levels, so the integer peak tests `pa[1] > pa[7]` could not
+resolve a preamble. Re-testing the same capture **amplitude-scaled** across the
+levels the device really sees shows why AMB is safe and that table was not:
+
+| sample swing | float distinct | AMB distinct | int-sqrt |
+|---|---|---|---|
+| 108 | 289 | **304** | 289 (full strength only) |
+| 54 | 241 | **264** | - |
+| 27 | 144 | **199** | - |
+| 10 | 36 | **92** | **0 (device died)** |
+
+AMB stays *continuous* in the input, so weak signals keep low-end magnitude
+resolution; it is also strictly better than float at every level.
+
+**Lesson:** a magnitude/magnitude-like change is only validated when it is exercised
+at the signal levels that actually occur. Benchmark on the target ISA, not the
+host - the sqrt ranking inverts between x86 and RV32F.
