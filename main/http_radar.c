@@ -625,16 +625,14 @@ static esp_err_t h_settings_post(httpd_req_t *req)
         rtl_pipeline_restart();
     }
 
-    /* Return updated settings */
+    /* Return the settings that are actually in effect. Previously this fell
+     * back to DEFAULT_* for any field absent from the request, so a partial
+     * POST (e.g. an alert fix sending only {gain}) reported values the device
+     * was not using. Report the merged/applied state instead. */
     char resp[512];
-    int resp_gain = (gain != -1) ? gain : DEFAULT_GAIN_TENTH_DB;
-    bool resp_dc_filter = (dc_filter != -1) ? dc_filter : DEFAULT_DC_FILTER;
-    bool resp_adaptive_gain = (adaptive_gain != -1) ? adaptive_gain : DEFAULT_ADAPTIVE_GAIN;
-    int resp_mode = (gain_mode != -1) ? gain_mode : DEFAULT_GAIN_MODE;
-    bool resp_aggressive = (aggressive != -1) ? aggressive : DEFAULT_AGGRESSIVE;
-    bool resp_crc_fix = (crc_fix != -1) ? crc_fix : DEFAULT_CRC_FIX;
-    uint32_t resp_sample_rate_sps = (sample_rate_sps != -1) ? (uint32_t)sample_rate_sps : DEFAULT_SAMPLE_RATE_SPS;
-    settings_json_response(resp, sizeof(resp), resp_gain, resp_dc_filter, resp_adaptive_gain, resp_mode, resp_aggressive, resp_crc_fix, resp_sample_rate_sps);
+    settings_json_response(resp, sizeof(resp), new_gain, new_dc_filter,
+                           new_adaptive_gain, (int)new_gain_mode, new_aggressive,
+                           new_crc_fix, new_sample_rate_sps);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

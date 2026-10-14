@@ -501,3 +501,50 @@ honestly instead of leaving it open. Status: **unresolved, not fixed, not
 reproducing since v0.5.1.** If it returns, capture `/api/status` and
 `/api/debug` at the moment of failure, plus the serial log, to separate tuner
 gain state from a USB/pipe problem.
+
+## L36 — Syntactic tests cannot catch semantic drift; a rejected value poisons the whole form
+
+The web UI still offered **2048000** in the sample-rate dropdown long after the
+firmware started rejecting it with `400`. Clicking **Save Settings** returned:
+
+```
+400 Bad Request - sample_rate_sps must be 2400000 (2.048 MSPS does not decode ADS-B)
+```
+
+and **nothing saved at all** — not the gain, not the DC filter, nothing. The
+settings form posts every field in one request, so a single invalid field
+rejects the entire save. Changing gain, which was perfectly valid, was impossible.
+
+Two alert "fix" buttons were worse: **USB OVERRUN** and **DECODER OVERLOAD**
+each proposed "Drop the sample rate to 2048000 SPS" as a one-click remedy.
+Clicking either one *always* 400s, because 2.048 is exactly what the API refuses.
+The UI was actively recommending a fix guaranteed to fail.
+
+**Why the existing checks missed it.** AGENTS.md §5.2 verified HTML parses, JS
+passes `node --check`, and no duplicate identifiers — all *syntactic*. Nothing
+compared **what the UI can send** against **what the API accepts**. A dropdown
+whose only option is invalid is perfectly valid HTML and passes `node --check`
+every time.
+
+**Fixes:**
+1. Removed the 2.048 option; the control is now disabled with an inline
+   explanation of why 2.4 MSPS is fixed.
+2. Both alert fixes rewritten to stop proposing an unavailable remedy; USB
+   overrun now points at the USB host/hub, which is the actual cause.
+3. The UI pins the rate via `FIXED_SAMPLE_RATE` and one `settingsPayload()`
+   helper, so a stale DOM or a re-injected alert fix cannot 400 the form again.
+4. Fixed a related lie: `POST /api/settings` reported `DEFAULT_*` for any field
+   absent from the request, so a partial POST (an alert fix) returned values the
+   device was not using. It now reports the merged state actually applied.
+5. New `tests/web/check_ui_api.py` cross-checks UI-sendable values against the
+   API constraints in `main/http_radar.c`, wired into the §5.2a gate.
+
+**Lesson:** validating that two halves of a system *parse* is not the same as
+validating that they *agree*. When a value is rejected by an API, treat every
+producer of that value as suspect — and remember that a whole-form POST turns one
+bad field into a total failure.
+
+**Rule:** any new API validation rule needs a matching UI-side check, and the
+check must live in the pre-flash gate. A test that cannot fail is not a test, so
+both failure modes above were injected deliberately to confirm the guard actually
+catches them before the fix was accepted.
