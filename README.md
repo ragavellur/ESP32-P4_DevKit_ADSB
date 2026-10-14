@@ -391,11 +391,16 @@ different licenses**. Read this before redistributing.
 
 | Component | Origin | License |
 |---|---|---|
-| `main/` | Original — this project | see below |
+| `main/` | Original — this project (app, pipeline, web UI, feeder) | ⚠️ undetermined — see below |
 | `components/adsb_decoder/` | Original code. The **algorithm** is ported from **readsb** (`demod_2400.c`, `convert.c`, `mode_s.c`) | ⚠️ see note |
 | `components/esp_rtl_sdr/` | Vendored from a separate upstream project by the same author. Its header states it is a **clean-room implementation, not a librtlsdr port** | **AGPL-3.0** |
 | `managed_components/espressif__usb` | Espressif, fetched at build time | Apache-2.0 |
 | ESP-IDF, lwIP, FreeRTOS | Espressif / third party | Apache-2.0 / BSD |
+
+**⚠️ Note on `main/`.** There is **no `LICENSE` file at the repository root**,
+so the application layer currently has no explicit licence grant. Combined with
+the AGPL-3.0 component below it, the tree as a whole is best treated as
+**copyleft-encumbered** until you choose a licence and add one.
 
 **⚠️ Note on the decoder.** The demodulation algorithm is a port of readsb,
 which is **GPL-3.0**. Porting an algorithm is not the same as copying source,
