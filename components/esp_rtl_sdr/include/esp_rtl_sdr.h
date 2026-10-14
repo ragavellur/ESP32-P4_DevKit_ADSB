@@ -191,8 +191,8 @@ const char *esp_rtl_sdr_err_to_name(esp_err_t err);
 #define ESP_RTL_SDR_RATE_960K          960000u   /**< P4 continuous path (provenance) */
 #define ESP_RTL_SDR_RATE_1024K         1024000u
 #define ESP_RTL_SDR_RATE_1800K         1800000u
-#define ESP_RTL_SDR_RATE_2048K         2048000u  /**< P4 ADS-B path (provenance) */
-#define ESP_RTL_SDR_RATE_2400K         2400000u  /**< PC clean-room capture rate */
+#define ESP_RTL_SDR_RATE_2048K         2048000u  /**< legacy ADS-B path (does NOT decode: 0 CRC) */
+#define ESP_RTL_SDR_RATE_2400K         2400000u  /**< P4 ADS-B path (dump1090 readsb geometry) */
 #define ESP_RTL_SDR_RATE_2560K         2560000u  /**< vendor "stable" ceiling (Blog V4 DS) */
 #define ESP_RTL_SDR_RATE_3200K         3200000u  /**< max; drops expected */
 
@@ -356,7 +356,7 @@ typedef enum {
  */
 typedef enum {
     ESP_RTL_SDR_NEED_FM = 0,         /**< broadcast FM-class: 960k @ preferred LO */
-    ESP_RTL_SDR_NEED_ADSB = 1,       /**< 1090 MHz, 2.048 MSPS */
+    ESP_RTL_SDR_NEED_ADSB = 1,       /**< 1090 MHz, 2.4 MSPS (dump1090 readsb geometry) */
     ESP_RTL_SDR_NEED_WX = 2,         /**< NOAA WX 162.400 MHz, 960k */
     ESP_RTL_SDR_NEED_HF = 3,         /**< HF intent — WWV 10 MHz default; CAP_HF_UPCONVERTER */
     ESP_RTL_SDR_NEED_MAX_STABLE = 4, /**< passport best_stable, else 2.048M */

@@ -51,6 +51,9 @@ class Decoder {
     void set_aggressive(bool enable);
     void set_crc_fix(bool enable);
     void set_sample_rate(uint32_t sample_rate_sps);
+    /* Noise-adaptive preamble gate (readsb --preamble-threshold). Higher = stricter. */
+    void set_preamble_threshold(uint32_t threshold);
+    uint32_t preamble_threshold() const { return preamble_threshold_; }
 
   private:
     /* Process a run of sample pairs (cu8). May be called repeatedly by
@@ -59,18 +62,29 @@ class Decoder {
     void process_pairs(const uint8_t* data, size_t pairs, FrameCallback callback,
                        void* context);
 
+    /* dump1090/readsb demodulate2400 port.
+     *
+     * Geometry at 2.4 MSPS: preamble occupies 20 samples (19 + phase/5), a long
+     * message is 112 bits * 12/5 = 268 samples. The slicer reads up to
+     * pPtr+20 for the last correlation tap, so keep ample trailing room. */
     static constexpr size_t kMagnitudeCapacity = 16640;
-    static constexpr size_t kMaxFrameSamples = 288; /* largest kFrameSamples (2.4 MSPS) */
+    static constexpr size_t kLongMsgSamples = 268;
+    static constexpr size_t kShortMsgSamples = 135;
+    static constexpr size_t kMaxFrameSamples = kLongMsgSamples;
+    /* Trailing samples carried into the next block (preamble + longest message). */
+    static constexpr size_t kTrailingSamples = kLongMsgSamples + 24;
     uint16_t magnitudes_[kMagnitudeCapacity]{};
     size_t overlap_ = 0;
     Stats stats_{};
     bool dc_filter_enabled_ = false;
-    int32_t dc_i_accum_ = 0;
-    int32_t dc_q_accum_ = 0;
-    uint32_t dc_sample_count_ = 0;
+    float dc_z1_i_ = 0.0f;
+    float dc_z1_q_ = 0.0f;
+    float dc_a_ = 0.0f;
+    float dc_b_ = 1.0f;
     bool aggressive_ = false;
     bool crc_fix_enabled_ = false;
-    uint32_t sample_rate_sps_ = 2048000;
+    uint32_t sample_rate_sps_ = 2400000;
+    uint32_t preamble_threshold_ = 100;
 };
 
 }  // namespace adsb_radar::adsb_rx

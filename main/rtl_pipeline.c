@@ -20,7 +20,12 @@
 #define STATUS_TAG "rtl_stat"
 
 #define ADSB_FREQ_HZ 1090000000u
-#define ADSB_RATE_SPS 2048000u
+#define ADSB_RATE_SPS 2400000u
+
+/* Noise-adaptive preamble gate (readsb --preamble-threshold). Validated on a
+ * real 30 s 2.4 MSPS capture: distinct aircraft peaks here (100 -> 289 distinct,
+ * vs readsb 419); lower values admit noise-triggered false preambles. */
+#define ADSB_PREAMBLE_THRESHOLD 100u
 
 /* Waiting for a device/state change. */
 #define DEVICE_WAIT_TICK pdMS_TO_TICKS(500)
@@ -43,7 +48,7 @@
 #define DEFAULT_GAIN_MODE 0  /* 0=manual, 1=adaptive */
 #define DEFAULT_AGGRESSIVE false
 #define DEFAULT_CRC_FIX false
-#define DEFAULT_SAMPLE_RATE_SPS 2048000u
+#define DEFAULT_SAMPLE_RATE_SPS 2400000u
 
 /* Adaptive gain parameters */
 #define ADAPTIVE_GAIN_HYSTERESIS_S 3
@@ -133,6 +138,20 @@ typedef struct {
     /* track-store lock (DSP task writes, status task expires/reads) */
     SemaphoreHandle_t track_mutex;
     TaskHandle_t dsp_handle;
+    /* Sliding 60 s counters so the web UI can show decode health over USB-less
+     * operation (no serial). Written only by the status task. */
+    uint32_t win60_preamble;
+    uint32_t win60_frames;
+    uint32_t win60_crc;
+    uint32_t win60_df17;
+    uint32_t win60_bytes;
+    /* Baseline captured 60 s ago. */
+    uint32_t base60_preamble;
+    uint32_t base60_frames;
+    uint32_t base60_crc;
+    uint32_t base60_df17;
+    uint32_t base60_bytes;
+    uint32_t win60_uptime_ms;
 } rtl_ctx_t;
 
 static rtl_ctx_t s_ctx;
@@ -196,7 +215,15 @@ static void settings_load(void)
     }
     uint32_t val32_u;
     if (nvs_get_u32(h, SETTINGS_KEY_SAMPLE_RATE, &val32_u) == ESP_OK) {
-        s_settings.sample_rate_sps = val32_u;
+        /* Migration: 2.048 MSPS was the old default but decodes NOTHING on
+         * this R820T2 (verified against readsb: 0 CRC at 2.048, 780+ at 2.4).
+         * Any stored 2.048 is upgraded to 2.4 so existing units self-heal. */
+        if (val32_u == 2048000u) {
+            ESP_LOGW(PIPELINE_TAG, "migrating stored sample rate 2048000 -> 2400000");
+            s_settings.sample_rate_sps = 2400000u;
+        } else {
+            s_settings.sample_rate_sps = val32_u;
+        }
     }
     uint8_t val8;
     if (nvs_get_u8(h, SETTINGS_KEY_DC_FILTER, &val8) == ESP_OK) {
@@ -473,6 +500,11 @@ static void adsb_decoder_task(void *arg)
     }
     adsb_decoder_bridge_reset();
     adsb_decoder_bridge_set_frame_hook(on_frame_hook, NULL);
+    /* Decoder geometry must match the programmed sample rate (dump1090
+     * demodulate2400 geometry is fixed at 2.4 MSPS). */
+    adsb_decoder_bridge_set_sample_rate(s_settings.sample_rate_sps);
+    ESP_LOGI(DSP_TAG, "decoder rate=%u SPS preamble_threshold=%u",
+             (unsigned)s_settings.sample_rate_sps, (unsigned)ADSB_PREAMBLE_THRESHOLD);
 
     for (;;) {
         uint32_t idx;
@@ -515,6 +547,25 @@ static void status_task(void *arg)
         const uint32_t crc_now = s_ctx.decode_ok ? ds.decoder_crc_ok : 0;
         s_ctx.frame_cnt = frames_now;
         s_ctx.crc_ok = crc_now;
+
+        /* Maintain a 60 s sliding window for USB-less health reporting. */
+        {
+            static uint32_t last_uptime_ms = 0;
+            const uint32_t now_ms_ = (uint32_t)(esp_timer_get_time() / 1000);
+            if (last_uptime_ms != 0 &&
+                (uint32_t)(now_ms_ - last_uptime_ms) >= 60000u) {
+                s_ctx.base60_preamble = ds.decoder_preambles;
+                s_ctx.base60_frames = ds.decoder_frames;
+                s_ctx.base60_crc = ds.decoder_crc_ok;
+                s_ctx.base60_df17 = ds.decoder_df17;
+                s_ctx.base60_bytes = s_ctx.metrics.bytes_total;
+                s_ctx.win60_uptime_ms = now_ms_ - last_uptime_ms;
+                last_uptime_ms = now_ms_;
+            }
+            if (last_uptime_ms == 0) {
+                last_uptime_ms = now_ms_;
+            }
+        }
 
         esp_rtl_sdr_health_info_t health;
         memset(&health, 0, sizeof(health));
@@ -769,6 +820,65 @@ uint32_t rtl_pipeline_fill_aircraft(adsb_aircraft_t *out, uint32_t cap)
     return n;
 }
 
+void rtl_pipeline_get_debug(rtl_pipeline_debug_t *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+
+    adsb_decoder_bridge_stats_t ds;
+    memset(&ds, 0, sizeof(ds));
+    adsb_decoder_bridge_get_stats(&ds);
+
+    out->preambles_total = ds.decoder_preambles;
+    out->frames_total = ds.decoder_frames;
+    out->crc_total = ds.decoder_crc_ok;
+    out->df17_total = ds.decoder_df17;
+    out->mag_min = ds.decoder_magnitude_min;
+    out->mag_max = ds.decoder_magnitude_max;
+    out->bytes_total = s_ctx.metrics.bytes_total;
+
+    /* 60 s deltas (0 until the first full window completes).
+     * The driver's counters reset on restart, so subtract defensively: a raw
+     * unsigned subtraction would wrap and report nonsense rates (e.g.
+     * iq_bytes_per_s in the tens of MB/s on a 4.8 MB/s stream). */
+    const uint32_t span = s_ctx.win60_uptime_ms / 1000u;
+    out->win60_seconds = span;
+    out->win60_preamble = (ds.decoder_preambles >= s_ctx.base60_preamble)
+                             ? ds.decoder_preambles - s_ctx.base60_preamble : 0;
+    out->win60_frames = (ds.decoder_frames >= s_ctx.base60_frames)
+                            ? ds.decoder_frames - s_ctx.base60_frames : 0;
+    out->win60_crc = (ds.decoder_crc_ok >= s_ctx.base60_crc)
+                         ? ds.decoder_crc_ok - s_ctx.base60_crc : 0;
+    out->win60_df17 = (ds.decoder_df17 >= s_ctx.base60_df17)
+                          ? ds.decoder_df17 - s_ctx.base60_df17 : 0;
+    out->win60_bytes = (s_ctx.metrics.bytes_total >= s_ctx.base60_bytes)
+                           ? s_ctx.metrics.bytes_total - s_ctx.base60_bytes : 0;
+    if (span > 0) {
+        out->win60_effective_sps = (uint32_t)(((uint64_t)out->win60_bytes * 500ull) /
+                                             ((uint64_t)span * 1000ull));
+    }
+
+    out->programmed_sps = s_settings.sample_rate_sps;
+    out->preamble_threshold = ADSB_PREAMBLE_THRESHOLD;
+    out->gain_tenth_db = s_settings.gain_tenth_db;
+    out->gain_mode = (uint8_t)s_settings.gain_mode;
+    out->dc_filter = s_settings.dc_filter;
+    out->crc_fix = s_settings.crc_fix;
+
+    esp_rtl_sdr_health_info_t health;
+    memset(&health, 0, sizeof(health));
+    if (s_ctx.handle) {
+        (void)esp_rtl_sdr_get_health(s_ctx.handle, &health);
+    }
+    out->health_usb = (uint8_t)health.usb;
+    out->health_rf = (uint8_t)health.rf;
+    out->health_overall = (uint8_t)health.overall;
+    out->health_efficiency = health.efficiency;
+    out->sample_min = health.sample_min;
+    out->sample_max = health.sample_max;
+    snprintf(out->advice, sizeof(out->advice), "%s", health.advice);
+}
+
 esp_err_t rtl_pipeline_apply_settings(void)
 {
     if (!s_ctx.handle) {
@@ -800,7 +910,8 @@ esp_err_t rtl_pipeline_apply_settings(void)
                  last_applied_sample_rate, s_settings.sample_rate_sps);
         last_applied_sample_rate = s_settings.sample_rate_sps;
         /* Update decoder sample rate */
-        adsb_decoder_bridge_set_sample_rate(s_settings.sample_rate_sps);
+adsb_decoder_bridge_set_sample_rate(s_settings.sample_rate_sps);
+    adsb_decoder_bridge_set_preamble_threshold(ADSB_PREAMBLE_THRESHOLD);
         /* Signal pipeline restart needed */
         return ESP_ERR_INVALID_STATE; // Special code to indicate restart needed
     }

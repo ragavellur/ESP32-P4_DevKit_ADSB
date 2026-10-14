@@ -151,6 +151,77 @@ static void put_status_json(char *buf, size_t cap)
         s_receiver_lat, s_receiver_lon);
 }
 
+/* Rich decode diagnostics: everything needed to judge reception health from
+ * the browser alone, so the device can run headless (no USB serial). */
+static esp_err_t h_debug(httpd_req_t *req)
+{
+    rtl_pipeline_debug_t d;
+    rtl_pipeline_get_debug(&d);
+    rtl_pipeline_status_t st;
+    rtl_pipeline_get_status(&st);
+
+    /* Convenience derived rates (per second) from the 60 s window. */
+    const float win_crc_ps  = d.win60_seconds ? ((float)d.win60_crc / (float)d.win60_seconds) : 0.0f;
+    const float win_pre_ps  = d.win60_seconds ? ((float)d.win60_preamble / (float)d.win60_seconds) : 0.0f;
+    const float win_bytes_ps= d.win60_seconds ? ((float)d.win60_bytes / (float)d.win60_seconds) : 0.0f;
+    /* Preamble -> CRC yield tells you whether the receiver sees real signal. */
+    const float crc_yield   = d.win60_preamble ? ((float)d.win60_crc * 100.0f / (float)d.win60_preamble) : 0.0f;
+
+    char *buf = heap_caps_malloc(JSON_BUF_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+    snprintf(buf, JSON_BUF_CAP,
+        "{\"now\":%llu,\"phase\":\"%s\",\"device_present\":%s,\"decode_ok\":%s,"
+        "\"uptime_ms\":%llu,"
+        "\"totals\":{\"preambles\":%lu,\"frames\":%lu,\"crc_ok\":%lu,"
+        "\"df17\":%lu,\"iq_bytes\":%lu,\"tracks\":%lu},"
+        "\"window60\":{\"seconds\":%lu,\"preambles\":%lu,\"frames\":%lu,"
+        "\"crc_ok\":%lu,\"df17\":%lu,\"iq_bytes\":%lu,"
+        "\"preamble_per_s\":%.2f,\"crc_per_s\":%.2f,\"iq_bytes_per_s\":%.0f,"
+        "\"crc_yield_pct\":%.2f},"
+        "\"config\":{\"programmed_sps\":%lu,\"preamble_threshold\":%lu,"
+        "\"gain_tenth_db\":%d,\"gain_mode\":%u,\"dc_filter\":%s,\"crc_fix\":%s,"
+        "\"effective_sps\":%lu},"
+        "\"signal\":{\"mag_min\":%u,\"mag_max\":%u,\"sample_min\":%u,"
+        "\"sample_max\":%u},"
+        "\"health\":{\"usb\":%u,\"rf\":%u,\"overall\":%u,"
+        "\"efficiency\":%.3f,\"advice\":\"%s\"},"
+        "\"pipe\":{\"overruns\":%lu,\"drops\":%lu,\"ring_free\":%lu}}",
+        (unsigned long long)(esp_timer_get_time() / 1000),
+        st.phase == RTL_PIPELINE_STREAMING ? "streaming" :
+        st.phase == RTL_PIPELINE_OPTAINING ? "obtaining" :
+        st.phase == RTL_PIPELINE_DEVICE_LOST ? "device-lost" :
+        st.phase == RTL_PIPELINE_DEFUNCT ? "defunct" : "idle",
+        st.device_present ? "true" : "false",
+        st.decode_ok ? "true" : "false",
+        (unsigned long long)(esp_timer_get_time() / 1000),
+        (unsigned long)d.preambles_total, (unsigned long)d.frames_total,
+        (unsigned long)d.crc_total, (unsigned long)d.df17_total,
+        (unsigned long)d.bytes_total, (unsigned long)st.track_count,
+        (unsigned long)d.win60_seconds, (unsigned long)d.win60_preamble,
+        (unsigned long)d.win60_frames, (unsigned long)d.win60_crc,
+        (unsigned long)d.win60_df17, (unsigned long)d.win60_bytes,
+        win_pre_ps, win_crc_ps, win_bytes_ps, crc_yield,
+        (unsigned long)d.programmed_sps, (unsigned long)d.preamble_threshold,
+        (int)d.gain_tenth_db, (unsigned)d.gain_mode,
+        d.dc_filter ? "true" : "false", d.crc_fix ? "true" : "false",
+        (unsigned long)st.effective_sps,
+        (unsigned)d.mag_min, (unsigned)d.mag_max,
+        (unsigned)d.sample_min, (unsigned)d.sample_max,
+        (unsigned)d.health_usb, (unsigned)d.health_rf, (unsigned)d.health_overall,
+        (double)d.health_efficiency, d.advice,
+        (unsigned long)st.overrun_cnt, (unsigned long)st.consumer_drops,
+        (unsigned long)st.ring_free_slots);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t ret = httpd_resp_send(req, buf, strlen(buf));
+    heap_caps_free(buf);
+    return ret;
+}
+
 static esp_err_t h_radar(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
@@ -265,7 +336,7 @@ static esp_err_t h_location_post(httpd_req_t *req)
 #define DEFAULT_GAIN_MODE 0  /* 0=manual, 1=adaptive */
 #define DEFAULT_AGGRESSIVE false
 #define DEFAULT_CRC_FIX false
-#define DEFAULT_SAMPLE_RATE_SPS 2048000u
+#define DEFAULT_SAMPLE_RATE_SPS 2400000u
 
 static void settings_json_response(char *buf, size_t cap,
                                    int gain, bool dc_filter, bool adaptive_gain, int gain_mode, bool aggressive, bool crc_fix, uint32_t sample_rate_sps)
@@ -442,8 +513,11 @@ static esp_err_t h_settings_post(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "gain_mode must be 0 (manual) or 1 (adaptive)");
         return ESP_FAIL;
     }
-    if (sample_rate_sps != -1 && (sample_rate_sps != 2048000 && sample_rate_sps != 2400000)) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "sample_rate_sps must be 2048000 or 2400000");
+    if (sample_rate_sps != -1 && sample_rate_sps != 2400000) {
+        /* 2.048 MSPS is rejected: verified on this R820T2 it decodes 0
+         * messages on any decoder (readsb included); only 2.4 MSPS works. */
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                            "sample_rate_sps must be 2400000 (2.048 MSPS does not decode ADS-B)");
         return ESP_FAIL;
     }
 
@@ -592,6 +666,10 @@ esp_err_t http_radar_start(void)
         .uri = "/api/status", .method = HTTP_GET,
         .handler = h_status_json, .user_ctx = NULL
     };
+    const httpd_uri_t r_debug = {
+        .uri = "/api/debug", .method = HTTP_GET,
+        .handler = h_debug, .user_ctx = NULL
+    };
     const httpd_uri_t r_loc_get = {
         .uri = "/api/location", .method = HTTP_GET,
         .handler = h_location_get, .user_ctx = NULL
@@ -616,6 +694,7 @@ esp_err_t http_radar_start(void)
         httpd_register_uri_handler(server, &r_root)   != ESP_OK ||
         httpd_register_uri_handler(server, &r_feed)   != ESP_OK ||
         httpd_register_uri_handler(server, &r_status) != ESP_OK ||
+        httpd_register_uri_handler(server, &r_debug)  != ESP_OK ||
         httpd_register_uri_handler(server, &r_loc_get)  != ESP_OK ||
         httpd_register_uri_handler(server, &r_loc_post) != ESP_OK ||
         httpd_register_uri_handler(server, &r_settings_get)  != ESP_OK ||
@@ -626,6 +705,6 @@ esp_err_t http_radar_start(void)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "server up: / /radar /data/aircraft.json /api/status /api/settings /api/location");
+    ESP_LOGI(TAG, "server up: / /radar /data/aircraft.json /api/status /api/debug /api/settings /api/location");
     return ESP_OK;
 }

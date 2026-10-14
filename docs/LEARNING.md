@@ -247,3 +247,78 @@ Almost every wrong turn above traces to **not verifying reality before acting**:
 - **Why it mattered:** any consumer that trusted `phase` silently mis-classified a healthy, streaming receiver as idle — e.g. it would have suppressed every "streaming-only" diagnostic warning.
 - **Rule:** an enum + formatter that is never fed inputs is a latent trap. When adding a field to a status struct, grep for where it is *written*, not just where the struct type is declared — a zero-filled struct happily serialises as a plausible-looking default.
 
+
+## L28. 2.048 MSPS decodes ZERO messages; 2.4 MSPS is the only working ADS-B rate (corrects L22, L25)
+
+The receiver produced preambles but almost no CRC-valid frames. After ruling out gain,
+antenna and USB, the same **Nooelec NESDR Nano 2+ + antenna was run through real `readsb`
+on the Mac**:
+
+| Sample rate | readsb preambles | correct CRC |
+|---|---|---|
+| 2.048 MSPS | 72k–140k | **0** (every gain 15–49.6 dB, ±10 ppm) |
+| 2.4 MSPS | 96k | **780** |
+
+**2.048 MSPS cannot decode Mode-S on this R820T2 with ANY decoder**, readsb included. So L22
+("bit spacing must scale with sample rate") and L25 ("2.4 MSPS is still unusable") were both
+incomplete/mistaken — the real blocker was the **detector algorithm**, not the geometry.
+
+**Root cause:** `adsb_decoder.cpp` used a hand-rolled detector — `|I|+|Q|` magnitude, fixed
+pulse indices `{0,2,7,9}`, a single fixed slicing phase searched over a 900 milli-sample
+window, and a raw 2-point compare `interp(center) > interp(center+half_bit)`. Fixed sample
+indices cannot track the arbitrary sub-sample phase of real IQ, so it found pulse-ish things
+but sliced the wrong bits and CRC never passed.
+
+**Fix:** ported readsb's proven `demodulate2400` into `adsb_decoder.cpp`:
+- linear amplitude `sqrt((I-127.5)² + (Q-127.5)²)` normalised to 0..65535 (not `|I|+|Q|`)
+- DC removal as a **1 Hz** single-pole high-pass (`dc_b = exp(-2π/sr)`), not a 1/4096 mean
+- noise-adaptive preamble gate `ref_level = base_noise * preamble_threshold / 32`
+- **5-phase** search with DC-balanced correlation slicers `slice_phase0..4` (`slice_byte`
+  advances 19 samples/byte, 20 on wrap), picks the best-scoring phase
+- skip `msgbits*8/4` samples after a hit so a frame is not re-decoded at every bit offset
+
+Also: NVS already stored 2048000 on existing units, so `settings_load()` **migrates any
+stored 2048000 → 2400000** (existing hardware self-heals). `/api/settings` now rejects
+2048000 outright.
+
+**Result:** 0 CRC/s and 0 tracks → ~5 CRC/s and **9 tracked aircraft (4 positioned)**.
+Verified offline on the real capture before flashing: 650 CRC / 289 distinct aircraft vs
+readsb's 883 / 419.
+
+**Lesson:** a green `self_check()` proved nothing about reception — it only exercised
+`parse()`/CRC on hardcoded bytes and explicitly *skipped* the live slicing path
+("live_magnitudes test skipped"). Always validate the IQ→bits→frame path against a **real
+capture**, and let a known-good reference decoder produce the expected number first.
+
+## L29. RF health latched a permanent false "clipping" alarm and talked the user into killing reception
+
+`metrics.sample_min/sample_max` were a **running cumulative min/max that `start()` never
+reset** (only `bytes_total/blocks_total/overruns/consumer_drops` were cleared). One
+transient spike during boot pinned the rails forever, so health reported
+`sample=[0,255] / rf=CLIPPING / "RF clipping - reduce gain"` **while 9 aircraft were decoding
+perfectly**. Following that advice drove gain to 0 dB, which genuinely produced zero aircraft.
+
+Two more defects in the same check: the min/max scan used `i += 64` (32 samples per 64 KiB
+block, **I channel only, Q never inspected**), and a single block tripping
+`max>=250 && min<=8` was enough.
+
+**Fix:** rolling window of the last 32 blocks (~0.4 s at 2.4 MSPS), full-block scan of I
+and Q, window cleared in `start()`, and a verdict now needs **8 consecutive** rail-pinned
+(or dead-flat) blocks.
+
+**Lesson:** a health check whose advice is "reduce gain" must be near-impossible to false
+trigger, and any *latched* metric must be reset when the stream restarts. Diagnostic output
+that persists across restarts will eventually contradict reality and be believed.
+
+## L30. `ring_free == 0` means IQ is being dropped before it is ever decoded
+
+`/api/debug` showed `ring_free` pinned at 0 of 8 slots while bytes flowed at a full
+4.8 MB/s. The pipeline ring (8 × 64 KiB) is filled by the driver callback and only drained
+by `adsb_dsp`; when the decoder cannot keep up, `ring_take_free()` returns `UINT32_MAX` and
+blocks are **silently discarded** — `overruns`/`drops` stay 0 because the driver thinks it
+delivered fine.
+
+Cause: firmware is built with `CONFIG_COMPILER_OPTIMIZATION_DEBUG=y` → **`-Og`** for every
+translation unit, including the per-sample DSP loop. Deliberately left as-is for now
+(whole-firmware optimisation is a separate, separately-measured change), but it is the
+leading suspect for the decode-rate variance between ~0.7/s and ~5/s.
