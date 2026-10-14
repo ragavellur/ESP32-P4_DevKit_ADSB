@@ -468,3 +468,36 @@ check the actual `LICENSE` files in-tree rather than reasoning from memory.
 Run `find . -iname LICENSE -not -path ./build/*`. The header comments in a
 component are often more accurate about origin than whatever you assumed
 when you added it.
+
+## L35 — A symptom that stopped reproducing is a finding, not a nuisance
+
+**Symptom:** shortly after a reset, the IQ sample range collapsed toward the
+8-bit midpoint (`smp=[124,130]`, swing ~6, magnitude max down ~27x) and CRC
+fell to exactly 0. Effective sample rate stayed at a perfect 2,400,000 and
+`over=0 drops=0`, so the USB path looked healthy. A reboot restored reception
+immediately.
+
+**What the evidence eventually showed:** it was not reproducible. Once the
+`v0.5.1` feeder boot-loop fix landed, the device ran **27.7 minutes** past the
+1–2 minute onset window with swing steady at **40–72**, CRC climbing
+continuously, zero overruns, and `crc_yield_pct` 100%.
+
+**Most likely cause:** every original observation was taken while the device
+was rebooting continuously in the L33 loop, or immediately around it. Churning
+the R820T2 through stream start/stop dozens of times per second is a far better
+explanation for bad tuner state than a "warm-up" effect — and it is a different
+failure mode from anything the DSP does.
+
+**Lesson:** a self-healing symptom that clears on reboot is exactly the kind of
+thing that gets "fixed" by speculative code changes. The decode path here had
+already survived two reverted optimisations; a third change made for a
+non-reproducing symptom could easily have cost the stable reception.
+
+**Rule:** before "fixing" an intermittent hardware symptom, first establish
+(a) whether it still reproduces on a known-good build, and (b) whether the
+machine was in a degraded state when it was first seen. Record the
+non-reproduction as a result — it is evidence, and it closes the question
+honestly instead of leaving it open. Status: **unresolved, not fixed, not
+reproducing since v0.5.1.** If it returns, capture `/api/status` and
+`/api/debug` at the moment of failure, plus the serial log, to separate tuner
+gain state from a USB/pipe problem.
