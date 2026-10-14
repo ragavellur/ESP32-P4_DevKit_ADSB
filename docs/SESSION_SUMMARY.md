@@ -156,3 +156,46 @@
 - **Conclusion:** higher gain widens the sample swing and **~doubles range** while **halving the raw frame rate**. "Best gain" is objective-dependent; since the goal is range/track coverage, the operational gain is **42.1 dB** (set, NVS-persisted). L26 **relabelled** (original crc/s sweep kept), tracker **7.9** updated.
 - **Open follow-up:** the in-page "GAIN NEAR MAXIMUM" alert still suggests dropping to **35.0 dB** — now inconsistent with the relabelled guidance (should suggest ~42 dB). Needs a `radar.html` edit + reflash; **not done** (awaiting go-ahead).
 - **Selection-set default:** corrected my own earlier claim that antenna placement explained the aircraft count — the gain change alone accounts for the 57→94 NM range shift; aircraft count also tracks live traffic and RX position, which were not held constant.
+
+## 2026-10-14 — BharatRadar feeder (Phase 7.19)
+
+**Goal:** feed decoded aircraft to BharatRadar so they appear on the public map.
+
+**Why it was blocked:** the C bridge decoded ADS-B *fields* and then threw the
+raw Mode-S frame away, so no feeder could forward it. BEAST needs the raw bytes.
+
+**Sequence:**
+
+1. **Expose real frames.** `adsb_frame_info_t` gained `bytes[14]`, `bit_length`
+   and `rx_timestamp_us`, filled in `adsb_decoder_bridge.cpp`. Added a 64-entry
+   capture ring + `/api/frames` so real device frames could be pulled as hex.
+
+2. **Prove the protocol offline first.** Replayed 64 captured device frames
+   through the already-proven Python feeder to the live hub. 32,960 frames
+   accepted; aircraft appeared on `map.bharatradar.com` with real callsigns
+   (IGO435/IGO619). Writing C before this would have been guesswork.
+
+3. **Port to C** (`main/beast_feeder.c`, task `beast_feed`). Verified
+   **byte-identical** output vs the Python encoder across 4 vectors covering
+   DF11/DF17, `0x1A` escaping and the 12 MHz timestamp — including frames
+   deliberately loaded with `0x1A` bytes.
+
+4. **Threading.** The decode hook is synchronous on `adsb_dsp` (core 1, prio 6),
+   so it only enqueues into a lock-free SPSC ring and drops on overflow; all
+   socket work is on a **core 0, prio 3** task with reconnect backoff. This is
+   L24 applied preemptively rather than after a starvation incident.
+
+5. **Config + UI.** NVS strings, `/api/feeder` GET/POST, Web UI section.
+   Ships **disabled** so a fresh flash never transmits unexpectedly.
+
+**Result on hardware:** `connected:true sent:6943 dropped:0 reconnects:0`, and
+6 aircraft appeared on the map that were not there before the native feeder ran.
+
+**Bug caught by hardware only (L32):** the two new routes pushed the server to
+13 against `max_uri_handlers = 12`; `httpd_start()` failed outright, so the
+device had no web UI at all while the feeder kept working — which made it look
+like a network fault. Raised to 16.
+
+**Open:** (a) tuner warm-up — IQ collapses to a ~6-count swing after 1-2 min of
+streaming and recovers on reset; (b) local track count exceeds the map count
+(9 vs 6), to be investigated next.

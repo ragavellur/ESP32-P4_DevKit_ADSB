@@ -12,6 +12,7 @@
 #include "freertos/task.h"
 #include "adsb_decoder_bridge.h"
 #include "adsb_state.h"
+#include "beast_feeder.h"
 #include "esp_log.h"
 #include "nvs.h"
 
@@ -388,6 +389,9 @@ static void bridge_to_state(const adsb_frame_info_t *f, uint32_t now_ms)
 static void on_frame_hook(const adsb_frame_info_t *f, void *ctx)
 {
     (void)ctx;
+    /* Hand the raw frame to the BharatRadar feeder first: it only enqueues
+     * into a lock-free ring, so it costs the decode core almost nothing. */
+    beast_feeder_push(f->bytes, f->bit_length, f->rx_timestamp_us);
     bridge_to_state(f, (uint32_t)(esp_timer_get_time() / 1000));
 }
 

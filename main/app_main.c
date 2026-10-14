@@ -6,6 +6,7 @@
 #include "nvs_flash.h"
 #include "eth_netif.h"
 #include "rtl_pipeline.h"
+#include "beast_feeder.h"
 
 static const char *TAG = "adsb_radar";
 
@@ -28,6 +29,13 @@ void app_main(void)
     ret = rtl_pipeline_init();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "rtl_pipeline_init failed: %s", esp_err_to_name(ret));
+    }
+
+    /* BharatRadar feeder. Started here (after NVS init) but it waits for the
+     * network and reconnects with backoff, so Ethernet need not be up yet. */
+    ret = beast_feeder_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "beast_feeder_start failed: %s", esp_err_to_name(ret));
     }
 
     #ifdef CONFIG_ADSB_RADAR_ETH

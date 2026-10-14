@@ -14,6 +14,7 @@
 
 #include "adsb_decoder_bridge.h"
 #include "adsb_state.h"
+#include "beast_feeder.h"
 #include "esp_rtl_sdr.h"
 #include "http_radar.h"
 #include "rtl_pipeline.h"
@@ -249,6 +250,44 @@ static esp_err_t h_aircraft_json(httpd_req_t *req)
     esp_err_t e = httpd_resp_send(req, buf, strlen(buf));
     heap_caps_free(buf);
     return e;
+}
+
+/* Recent raw Mode-S frames (hex), for offline feeder validation. */
+static esp_err_t h_frames(httpd_req_t *req)
+{
+    static adsb_captured_frame_t frames[64];
+    const uint32_t n = adsb_decoder_bridge_get_capture(frames, 64);
+
+    char *buf = heap_caps_malloc(JSON_BUF_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_FAIL;
+    }
+    int off = snprintf(buf, JSON_BUF_CAP, "{\"count\":%u,\"frames\":[", (unsigned)n);
+    for (uint32_t i = 0; i < n && off > 0 && off < (int)JSON_BUF_CAP; ++i) {
+        const uint32_t len = frames[i].bit_length / 8u;
+        char hex[29];
+        int k = 0;
+        for (uint32_t b = 0; b < len && k < 28; ++b) {
+            k += snprintf(hex + k, sizeof(hex) - (size_t)k, "%02x", frames[i].bytes[b]);
+        }
+        hex[k] = '\0';
+        off += snprintf(buf + off, JSON_BUF_CAP - (size_t)off,
+                        "%s{\"hex\":\"%s\",\"bits\":%u,\"t_us\":%lld}",
+                        i ? "," : "", hex, (unsigned)frames[i].bit_length,
+                        (long long)frames[i].rx_timestamp_us);
+        if (off >= (int)JSON_BUF_CAP) break;
+    }
+    if (off > 0 && off < (int)JSON_BUF_CAP) {
+        off += snprintf(buf + off, JSON_BUF_CAP - (size_t)off, "]}");
+    }
+    if (off < 0 || off >= (int)JSON_BUF_CAP) off = (int)JSON_BUF_CAP - 1;
+    buf[off] = '\0';
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t ret = httpd_resp_send(req, buf, strlen(buf));
+    heap_caps_free(buf);
+    return ret;
 }
 
 static esp_err_t h_status_json(httpd_req_t *req)
@@ -603,6 +642,121 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     return httpd_resp_send(req, resp, strlen(resp));
 }
 
+/* ---- BharatRadar feeder config/status ----------------------------------- */
+
+/* Extract a JSON string value for "key": returns a pointer just past the
+ * opening quote, or NULL. Mirrors the strstr-based parsing used by
+ * h_location_post() so the project keeps one parsing style. */
+static const char *json_find_value(const char *body, const char *key)
+{
+    char pat[32];
+    snprintf(pat, sizeof(pat), "\"%s\"", key);
+    const char *p = strstr(body, pat);
+    if (!p) return NULL;
+    p = strchr(p, ':');
+    if (!p) return NULL;
+    p++;
+    while (*p == ' ') p++;
+    if (*p != '"') return NULL;
+    return p + 1;
+}
+
+/* Copy a JSON string value (from json_find_value) into out, stopping at the
+ * closing quote or the buffer limit. Returns true if the key was present. */
+static bool json_copy_string(const char *body, const char *key, char *out, size_t out_sz)
+{
+    const char *v = json_find_value(body, key);
+    if (!v) return false;
+    size_t i = 0;
+    while (v[i] && v[i] != '"' && i + 1 < out_sz) {
+        out[i] = v[i];
+        i++;
+    }
+    out[i] = '\0';
+    return true;
+}
+
+static esp_err_t h_feeder_get(httpd_req_t *req)
+{
+    beast_feeder_config_t cfg;
+    beast_feeder_status_t st;
+    beast_feeder_get_config(&cfg);
+    beast_feeder_get_status(&st);
+
+    char buf[512];
+    int off = snprintf(buf, sizeof(buf),
+        "{\"enabled\":%s,\"uuid\":\"%s\",\"feeder_name\":\"%s\",\"host\":\"%s\","
+        "\"port\":%u,\"status\":{\"enabled\":%s,\"connected\":%s,\"queued\":%u,"
+        "\"sent\":%u,\"dropped\":%u,\"reconnects\":%u,\"last_error\":%d}}",
+        cfg.enabled ? "true" : "false", cfg.uuid, cfg.feeder_name, cfg.host,
+        (unsigned)cfg.port,
+        st.enabled ? "true" : "false", st.connected ? "true" : "false",
+        (unsigned)st.frames_queued, (unsigned)st.frames_sent,
+        (unsigned)st.frames_dropped, (unsigned)st.reconnects, st.last_error);
+    if (off < 0 || off >= (int)sizeof(buf)) off = (int)sizeof(buf) - 1;
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, buf, (size_t)off);
+}
+
+static esp_err_t h_feeder_post(httpd_req_t *req)
+{
+    char body[768];
+    int total = req->content_len;
+    if (total <= 0 || total >= (int)sizeof(body)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty or oversized body");
+        return ESP_FAIL;
+    }
+    int got = 0;
+    while (got < total) {
+        int r = httpd_req_recv(req, body + got, (size_t)(total - got));
+        if (r <= 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body recv failed");
+            return ESP_FAIL;
+        }
+        got += r;
+    }
+    body[got] = '\0';
+
+    /* Start from current config so a partial POST does not blank fields. */
+    beast_feeder_config_t cfg;
+    beast_feeder_get_config(&cfg);
+
+    if (strstr(body, "\"enabled\"")) {
+        cfg.enabled = (strstr(body, "true") != NULL);
+    }
+    json_copy_string(body, "uuid", cfg.uuid, sizeof(cfg.uuid));
+    json_copy_string(body, "feeder_name", cfg.feeder_name, sizeof(cfg.feeder_name));
+    json_copy_string(body, "host", cfg.host, sizeof(cfg.host));
+    if (strstr(body, "\"port\"")) {
+        const char *v = json_find_value(body, "port");
+        if (v && *v != '"') {
+            cfg.port = (uint16_t)atoi(v);
+        } else {
+            char tmp[8] = {0};
+            if (json_copy_string(body, "port", tmp, sizeof(tmp))) {
+                cfg.port = (uint16_t)atoi(tmp);
+            }
+        }
+    }
+
+    esp_err_t err = beast_feeder_set_config(&cfg);
+    if (err != ESP_OK) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+            "invalid config (enabling requires a 28-39 char UUID and host/port)");
+        return ESP_FAIL;
+    }
+    char ok[160];
+    int n = snprintf(ok, sizeof(ok),
+                     "{\"ok\":true,\"enabled\":%s,\"uuid\":\"%s\",\"host\":\"%s\",\"port\":%u}",
+                     cfg.enabled ? "true" : "false", cfg.uuid, cfg.host,
+                     (unsigned)cfg.port);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, ok, (size_t)n);
+}
+
 static esp_err_t h_settings_reset(httpd_req_t *req)
 {
     nvs_handle_t h;
@@ -619,6 +773,7 @@ static esp_err_t h_settings_reset(httpd_req_t *req)
     nvs_erase_key(h, SETTINGS_KEY_SAMPLE_RATE);
     nvs_commit(h);
     nvs_close(h);
+    beast_feeder_reset_settings();
 
     /* Apply defaults immediately */
     adsb_decoder_bridge_set_dc_filter(DEFAULT_DC_FILTER);
@@ -644,7 +799,7 @@ esp_err_t http_radar_start(void)
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 12;
+    cfg.max_uri_handlers = 16;
     cfg.lru_purge_enable = true;
     cfg.core_id = 0;  /* Pin httpd to core 0 */
 
@@ -673,6 +828,10 @@ esp_err_t http_radar_start(void)
         .uri = "/api/debug", .method = HTTP_GET,
         .handler = h_debug, .user_ctx = NULL
     };
+    const httpd_uri_t r_frames = {
+        .uri = "/api/frames", .method = HTTP_GET,
+        .handler = h_frames, .user_ctx = NULL
+    };
     const httpd_uri_t r_loc_get = {
         .uri = "/api/location", .method = HTTP_GET,
         .handler = h_location_get, .user_ctx = NULL
@@ -693,21 +852,32 @@ esp_err_t http_radar_start(void)
         .uri = "/api/settings/reset", .method = HTTP_POST,
         .handler = h_settings_reset, .user_ctx = NULL
     };
+    const httpd_uri_t r_feeder_get = {
+        .uri = "/api/feeder", .method = HTTP_GET,
+        .handler = h_feeder_get, .user_ctx = NULL
+    };
+    const httpd_uri_t r_feeder_post = {
+        .uri = "/api/feeder", .method = HTTP_POST,
+        .handler = h_feeder_post, .user_ctx = NULL
+    };
     if (httpd_register_uri_handler(server, &r_radar)  != ESP_OK ||
         httpd_register_uri_handler(server, &r_root)   != ESP_OK ||
         httpd_register_uri_handler(server, &r_feed)   != ESP_OK ||
         httpd_register_uri_handler(server, &r_status) != ESP_OK ||
         httpd_register_uri_handler(server, &r_debug)  != ESP_OK ||
+        httpd_register_uri_handler(server, &r_frames) != ESP_OK ||
         httpd_register_uri_handler(server, &r_loc_get)  != ESP_OK ||
         httpd_register_uri_handler(server, &r_loc_post) != ESP_OK ||
         httpd_register_uri_handler(server, &r_settings_get)  != ESP_OK ||
         httpd_register_uri_handler(server, &r_settings_post) != ESP_OK ||
-        httpd_register_uri_handler(server, &r_settings_reset) != ESP_OK) {
+        httpd_register_uri_handler(server, &r_settings_reset) != ESP_OK ||
+        httpd_register_uri_handler(server, &r_feeder_get) != ESP_OK ||
+        httpd_register_uri_handler(server, &r_feeder_post) != ESP_OK) {
         ESP_LOGE(TAG, "uri registration failed");
         httpd_stop(server);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "server up: / /radar /data/aircraft.json /api/status /api/debug /api/settings /api/location");
+    ESP_LOGI(TAG, "server up: / /radar /data/aircraft.json /api/status /api/debug /api/frames /api/settings /api/location");
     return ESP_OK;
 }

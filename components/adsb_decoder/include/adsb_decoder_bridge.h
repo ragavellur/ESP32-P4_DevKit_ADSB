@@ -31,6 +31,21 @@ typedef struct {
 
 void adsb_decoder_bridge_get_stats(adsb_decoder_bridge_stats_t* out);
 
+/** One raw frame from the recent-frame capture ring (see get_capture). */
+typedef struct {
+    uint8_t  bytes[14];
+    uint8_t  bit_length;      /**< 56 (DF11) or 112 (DF17) */
+    int64_t  rx_timestamp_us; /**< esp_timer at decode */
+} adsb_captured_frame_t;
+
+/**
+ * Copy up to `cap` recently decoded raw frames (oldest first) into *out.
+ * Lets /api/frames serve REAL device frames so the BharatRadar feeder can be
+ * replayed and validated offline against the reference Python implementation.
+ * Returns the number of frames written (<= cap).
+ */
+uint32_t adsb_decoder_bridge_get_capture(adsb_captured_frame_t* out, uint32_t cap);
+
 /* Every CRC-valid frame, mirrored to plain C. NUL-terminated strings. */
 typedef struct {
     uint32_t icao;
@@ -50,6 +65,12 @@ typedef struct {
     bool     cpr_odd;
     bool     has_cpr;
     int      signal; /* dB above noise floor (pulse - quiet) */
+    /* Raw Mode-S frame, exactly as demodulated (DF11 = 7 bytes, DF17 = 14).
+     * Required by the BharatRadar feeder, which forwards raw frames rather
+     * than decoded fields. bytes[] is only valid for bit_length/8 bytes. */
+    uint8_t  bytes[14];
+    uint8_t  bit_length;   /* 56 (DF11) or 112 (DF17) */
+    int64_t  rx_timestamp_us; /* esp_timer at decode, for the 12 MHz stamp */
 } adsb_frame_info_t;
 
 typedef void (*adsb_frame_hook_t)(const adsb_frame_info_t* f, void* ctx);
