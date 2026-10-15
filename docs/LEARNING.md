@@ -722,3 +722,42 @@ granted promptly and **the entire web server wedged** (`connection reset by
 peer` after ~16 ms) while the receiver kept decoding. The ladder is a compile-time
 table in `rtl_pipeline.c` already; serve it from there. **Never take a driver
 lock on a polled HTTP path.**
+
+## L39 — CPR pairing was never the problem; measure before optimising
+
+Asked why only ~20% of tracked aircraft had a position, the instinctive
+answer was "not enough position messages". Measuring first showed that was
+wrong.
+
+Added CPR diagnostics (`/api/debug.cpr`): even/odd frames received, tracks
+holding both parities inside the window, global-decode successes and failures.
+
+**Result over ~2700 pair attempts: 0 failures — 100% success.**
+
+So `decode_global_cpr()` is correct, the 10 s window is fine, and every aircraft
+we received *both* CPR parities for was positioned. Nothing is being lost in
+pairing.
+
+What the same measurement showed about the IQ-ring theory:
+
+| IQ_RING_SLOTS | drop rate | positioned |
+|---|---|---|
+| 8 | 13.7 blocks/s | 53–69% |
+| 32 | 11.8 blocks/s | 53–67% |
+
+A 4x deeper ring cut drops by **14%** and changed positioned **not at all**, so
+the ring was never the constraint — it was reverted rather than left in as
+2 MiB of PSRAM and 437 ms of extra buffering latency for no gain.
+
+Positioning is limited purely by **how much IQ the decoder can process**, and
+the decoder is CPU-bound at 2.4 MSPS. The remaining unpositioned tracks are
+aircraft heard on altitude/velocity but whose position frames we never capture.
+
+**Lesson:** "the buffer overflows, so the buffer is too small" is a hypothesis,
+not a finding. Here the overflow was real but the depth was irrelevant, and a
+plausible-sounding optimisation would have shipped for nothing.
+
+**Rule:** instrument the pipeline first and change exactly one thing. Keep a
+measurement window long enough to outlast the confounds — an earlier attempt to
+judge this same change from a 3-minute snapshot was worthless because the track
+table had not finished refilling after a reboot (tracks are RAM-only, TTL 60 s).

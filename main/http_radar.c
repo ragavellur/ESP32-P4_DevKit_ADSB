@@ -158,7 +158,9 @@ static void put_status_json(char *buf, size_t cap)
 static esp_err_t h_debug(httpd_req_t *req)
 {
     rtl_pipeline_debug_t d;
+    uint32_t cpr[6] = {0};
     rtl_pipeline_get_debug(&d);
+    adsb_state_get_cpr_stats(cpr);
     rtl_pipeline_status_t st;
     rtl_pipeline_get_status(&st);
 
@@ -191,7 +193,9 @@ static esp_err_t h_debug(httpd_req_t *req)
         "\"health\":{\"usb\":%u,\"rf\":%u,\"overall\":%u,"
         "\"efficiency\":%.3f,\"advice\":\"%s\"},"
         "\"pipe\":{\"overruns\":%lu,\"driver_drops\":%lu,\"ring_drops\":%lu,\"ring_free\":%lu},"
-        "\"dsp\":{\"busy_pct\":%.1f,\"samples_per_s\":%.0f,\"required_sps\":%lu}}",
+        "\"dsp\":{\"busy_pct\":%.1f,\"samples_per_s\":%.0f,\"required_sps\":%lu},"
+        "\"cpr\":{\"even\":%lu,\"odd\":%lu,\"both\":%lu,"
+        "\"ok\":%lu,\"fail\":%lu,\"tracks\":%lu}}",
         (unsigned long long)(esp_timer_get_time() / 1000),
         st.phase == RTL_PIPELINE_STREAMING ? "streaming" :
         st.phase == RTL_PIPELINE_OPTAINING ? "obtaining" :
@@ -219,7 +223,9 @@ static esp_err_t h_debug(httpd_req_t *req)
         (unsigned long)st.ring_drops,
         (unsigned long)st.ring_free_slots,
         (double)d.dsp_busy_pct, (double)d.dsp_samples_per_s,
-        (unsigned long)d.programmed_sps);
+        (unsigned long)d.programmed_sps,
+        (unsigned long)cpr[0], (unsigned long)cpr[1], (unsigned long)cpr[2],
+        (unsigned long)cpr[3], (unsigned long)cpr[4], (unsigned long)cpr[5]);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

@@ -77,6 +77,10 @@ void adsb_state_set_cpr_pair(adsb_cpr_pair_t pair);
 /* Feed one CRC-valid decoded frame. now_ms = monotonic ms tick. */
 void adsb_state_update(const adsb_frame_t* f, uint32_t now_ms);
 
+/* CPR diagnostics out[6] = {even, odd, both_in_window, decode_ok,
+ * decode_fail, tracks_with_cpr}. Returns false-safe no-op if out is NULL. */
+void adsb_state_get_cpr_stats(uint32_t out[6]);
+
 /* Expire tracks idle > ADS_STATE_TTL_MS. Call ~1 Hz. */
 uint32_t adsb_state_expire(uint32_t now_ms);
 

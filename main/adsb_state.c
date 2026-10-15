@@ -53,6 +53,15 @@ typedef struct {
 static adsb_track_t s_tracks[ADS_STATE_MAX_TRACKS];
 static adsb_cpr_pair_t s_pair = 0;
 
+/* CPR diagnostics: where do positions actually get lost? Exposed on
+ * /api/debug so we can measure rather than guess (see docs/LEARNING L39). */
+static volatile uint32_t s_cpr_even = 0;   /* TC9-18, even parity received   */
+static volatile uint32_t s_cpr_odd = 0;    /* TC9-18, odd parity received    */
+static volatile uint32_t s_cpr_both = 0;   /* both parities held, in window  */
+static volatile uint32_t s_cpr_ok = 0;     /* global CPR decode succeeded    */
+static volatile uint32_t s_cpr_fail = 0;   /* global CPR decode rejected     */
+static volatile uint32_t s_cpr_tracks = 0; /* tracks that ever held a CPR    */
+
 void adsb_state_init(void)
 {
     memset(s_tracks, 0, sizeof(s_tracks));
@@ -105,13 +114,24 @@ static void cpr_try_pair(adsb_track_t* t, uint32_t now_ms)
         now_ms - t->cpr_ms[1] > ADS_STATE_CPR_MAX_AGE_MS) {
         return;
     }
+    s_cpr_both++;
     double lat, lon;
     if (s_pair(t->icao, t->cpr_lat[0], t->cpr_lon[0],
                t->cpr_lat[1], t->cpr_lon[1], &lat, &lon)) {
         t->lat = lat;
         t->lon = lon;
         t->has_position = true;
+        s_cpr_ok++;
+    } else {
+        s_cpr_fail++;
     }
+}
+
+void adsb_state_get_cpr_stats(uint32_t out[6])
+{
+    if (!out) return;
+    out[0] = s_cpr_even; out[1] = s_cpr_odd; out[2] = s_cpr_both;
+    out[3] = s_cpr_ok;   out[4] = s_cpr_fail; out[5] = s_cpr_tracks;
 }
 
 void adsb_state_update(const adsb_frame_t* f, uint32_t now_ms)
@@ -141,6 +161,8 @@ void adsb_state_update(const adsb_frame_t* f, uint32_t now_ms)
         t->cpr_lon[parity] = f->cpr_longitude;
         t->cpr_ms[parity] = now_ms;
         t->cpr_have[parity] = true;
+        if (parity == 0) s_cpr_even++; else s_cpr_odd++;
+        s_cpr_tracks++;
         cpr_try_pair(t, now_ms);
     }
 
