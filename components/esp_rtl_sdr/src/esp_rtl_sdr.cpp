@@ -4345,14 +4345,23 @@ esp_err_t esp_rtl_sdr_get_tuner_gains(esp_rtl_sdr_handle_t handle, int *out_gain
         *out_count = 0;
         return ESP_RTL_SDR_ERR_UNSUPPORTED;
     }
-    *out_count = kMeasuredV4GainStepCount;
+    /* Report the SAME ladder that apply_profile_gain() will snap against for
+     * this handle. Returning a fixed table here while application is
+     * profile-dependent made the advertised and applied gain sets disagree
+     * (the Blog V4 table has no 48.0 dB step, the R820T2 one does), so a
+     * legitimate gain could be rejected by the API that validated it against
+     * this list (LEARNING L37). */
+    const bool use_r820t2 = rtl_profile_uses_r820t2_i2c_remap(handle->profile);
+    const size_t step_count = use_r820t2 ? kR820T2GainStepCount
+                                         : kMeasuredV4GainStepCount;
+    *out_count = step_count;
     if (out_gains_tenth_db == nullptr || max_count == 0) {
         return ESP_OK; /* size query */
     }
-    const size_t n =
-        (max_count < kMeasuredV4GainStepCount) ? max_count : kMeasuredV4GainStepCount;
+    const size_t n = (max_count < step_count) ? max_count : step_count;
     for (size_t i = 0; i < n; ++i) {
-        out_gains_tenth_db[i] = kMeasuredV4GainSteps[i].tenth_db;
+        out_gains_tenth_db[i] = use_r820t2 ? kR820T2GainSteps[i].tenth_db
+                                           : kMeasuredV4GainSteps[i].tenth_db;
     }
     *out_count = n;
     return ESP_OK;

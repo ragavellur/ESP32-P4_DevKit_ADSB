@@ -19,6 +19,7 @@ from html.parser import HTMLParser
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 UI = os.path.join(ROOT, "main", "radar_data", "radar.html")
 API = os.path.join(ROOT, "main", "http_radar.c")
+LADDER = os.path.join(ROOT, "components", "esp_rtl_sdr", "private", "gain_r820t2.hpp")
 
 failures = []
 checks = 0
@@ -79,6 +80,56 @@ def main():
             check((int(attrs.group(1)), int(attrs.group(2))) == (lo, hi),
                   f"UI gain input is {attrs.group(1)}-{attrs.group(2)} but the API "
                   f"enforces {lo}-{hi}")
+
+    # ---- 4. Gain ladder: the UI must not offer off-ladder values ----------
+    # The driver silently snaps any gain to the nearest real register step,
+    # so a free-text field could request 391 and silently run at 386 while
+    # every surface reported 391 (LEARNING.md L37). The gain control must be a
+    # dropdown built from the firmware ladder.
+    ladder_src = open(LADDER, encoding="utf-8").read()
+    steps = [int(m) for m in re.findall(r"\{\s*(\d+)\s*,\s*0x[0-9a-fA-F]{2}\s*,\s*0x[0-9a-fA-F]{2}\s*\}", ladder_src)]
+    check(len(steps) > 5,
+          f"could not parse the R820T2 gain ladder from {LADDER} (found {len(steps)} steps)")
+
+    if steps:
+        check('<input type="number" id="setGain"' not in ui,
+              "gain must NOT be a free-text number input; it must be a dropdown "
+              "built from the real tuner steps (LEARNING L37)")
+        check('id="setGain"' in ui, "gain control (setGain) is missing")
+        check("gain_ladder" in ui,
+              "UI should build the gain dropdown from the firmware ladder "
+              "(/api/settings gain_ladder)")
+        check("snapGain" in ui,
+              "UI alert fixes must snap proposed gains to real steps via snapGain(); "
+              "a +/-3 dB step frequently lands between register steps and would 400")
+
+        # Stronger: EVERY gain arithmetic expression must actually go through
+        # snapGain(). Merely having the helper defined proves nothing -- a
+        # leftover `gain - 30` would still 400 the API.
+        for m in re.finditer(r"gain\s*[-+]\s*\d+", ui):
+            prefix = ui[max(0, m.start() - 60):m.start()]
+            check("snapGain(" in prefix,
+                  f"gain arithmetic at offset {m.start()} ('{m.group(0)}') is not "
+                  f"wrapped in snapGain(); it will not land on a real tuner step "
+                  f"and the API will reject it")
+        for m in re.finditer(r"Math\.(?:max|min)\(\s*\d+\s*,\s*gain", ui):
+            prefix = ui[max(0, m.start() - 60):m.start()]
+            check("snapGain(" in prefix,
+                  f"clamped gain arithmetic at offset {m.start()} is not wrapped "
+                  f"in snapGain()")
+
+        # The API must validate against the ladder, not just 0-496.
+        check("rtl_pipeline_get_gain_ladder" in api,
+              "API should validate gain against the real tuner ladder")
+
+        # DEFAULT_GAIN in the UI must be a real step.
+        m_def = re.search(r"const DEFAULT_GAIN\s*=\s*(\d+)", ui)
+        if m_def:
+            check(int(m_def.group(1)) in steps,
+                  f"UI DEFAULT_GAIN={m_def.group(1)} is not a real tuner step")
+
+        # The documented optimum must also be a real step.
+        check(421 in steps, "the documented 42.1 dB optimum must exist on the ladder")
 
     # ---- 3. Syntax checks (the pre-existing AGENTS.md 5.2 gate) -----------
     class P(HTMLParser):

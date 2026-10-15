@@ -417,6 +417,40 @@ static void settings_json_response(char *buf, size_t cap,
         DEFAULT_AGGRESSIVE ? "true" : "false",
         DEFAULT_CRC_FIX ? "true" : "false",
         (unsigned long)DEFAULT_SAMPLE_RATE_SPS);
+
+    /* Append the tuner's real gain ladder and the gain actually applied, so
+     * the UI dropdown is built from the firmware rather than a hardcoded copy
+     * that can drift (LEARNING L37). */
+    int ladder[64];
+    const size_t ladder_n = rtl_pipeline_get_gain_ladder(ladder, 64);
+    int applied = gain;
+    if (!rtl_pipeline_get_applied_gain(&applied)) {
+        applied = gain;
+    }
+    size_t used = strlen(buf);
+    /* The base format string ends with "} }": the first closes the nested
+     * "defaults" object, the second closes the outer one. Strip exactly ONE so
+     * our new members land in the OUTER object, then re-close it. Stripping
+     * both would silently nest them inside "defaults". */
+    if (used == 0 || buf[used - 1] != '}') {
+        return; /* malformed base; leave it alone rather than corrupt it */
+    }
+    --used;
+    buf[used] = '\0';
+    if (used + 2 < cap) {
+        used += (size_t)snprintf(buf + used, cap - used, ",\"gain_applied\":%d", applied);
+    }
+    if (used + 16 < cap) {
+        used += (size_t)snprintf(buf + used, cap - used, ",\"gain_ladder\":[");
+    }
+    for (size_t i = 0; i < ladder_n && used + 8 < cap; ++i) {
+        used += (size_t)snprintf(buf + used, cap - used, "%s%d", i ? "," : "", ladder[i]);
+    }
+    if (used + 2 < cap) {
+        buf[used++] = ']';
+        buf[used++] = '}';
+    }
+    buf[used] = '\0';
 }
 
 static esp_err_t h_settings_get(httpd_req_t *req)
@@ -442,7 +476,7 @@ static esp_err_t h_settings_get(httpd_req_t *req)
         nvs_close(h);
     }
 
-    char buf[512];
+    char buf[768];
     settings_json_response(buf, sizeof(buf), gain, dc_filter != 0, adaptive_gain != 0, gain_mode, aggressive != 0, crc_fix != 0, sample_rate_sps);
 
     httpd_resp_set_type(req, "application/json");
@@ -547,9 +581,29 @@ static esp_err_t h_settings_post(httpd_req_t *req)
     free(buf);
 
     /* Validate */
+    /* Gain must be a real tuner register step, not merely in range. The driver
+     * silently snaps anything else to the nearest step (a request for 391 was
+     * applied as 386), so accepting arbitrary values let the UI, the API and
+     * NVS disagree with the hardware (LEARNING L37). */
     if (gain != -1 && (gain < 0 || gain > 496)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "gain must be 0-496");
         return ESP_FAIL;
+    }
+    if (gain != -1) {
+        int ladder[64];
+        const size_t n = rtl_pipeline_get_gain_ladder(ladder, 64);
+        if (n > 0) {
+            bool on_step = false;
+            for (size_t i = 0; i < n; ++i) {
+                if (ladder[i] == gain) { on_step = true; break; }
+            }
+            if (!on_step) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                    "gain must be one of the tuner's real steps; "
+                                    "see /api/settings for the supported ladder");
+                return ESP_FAIL;
+            }
+        }
     }
     if (gain_mode != -1 && (gain_mode < 0 || gain_mode > 1)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "gain_mode must be 0 (manual) or 1 (adaptive)");
@@ -629,7 +683,7 @@ static esp_err_t h_settings_post(httpd_req_t *req)
      * back to DEFAULT_* for any field absent from the request, so a partial
      * POST (e.g. an alert fix sending only {gain}) reported values the device
      * was not using. Report the merged/applied state instead. */
-    char resp[512];
+    char resp[768];
     settings_json_response(resp, sizeof(resp), new_gain, new_dc_filter,
                            new_adaptive_gain, (int)new_gain_mode, new_aggressive,
                            new_crc_fix, new_sample_rate_sps);

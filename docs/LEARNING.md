@@ -586,3 +586,62 @@ check whether any other decoder is native to the rate you want. Note also that
 the two decoders use **different magnitude scales** (×360 vs our ×415) and
 different preamble thresholds, so nothing is drop-in interchangeable — an
 intensity constant that works in one is wrong in the other.
+
+## L37 — A setting the driver silently snaps makes every surface lie
+
+The gain control was a free-text number box (`min=0 max=496`) and the API
+validated only that range. The R820T2 has only **29 real register steps**, so a
+request for `391` was silently snapped to the nearest one, **386**.
+
+| Surface | Reported |
+|---|---|
+| UI dropdown / input | 391 |
+| `POST /api/settings` response | 391 |
+| NVS (`gain_tenth_db`) | 391 |
+| `GET /api/status` | 391 |
+| **Actual tuner register state** | **386 (38.6 dB)** |
+
+So the device was running **3.5 dB below our measured 42.1 dB optimum** while
+four separate surfaces all insisted it was fine. Nothing reported the truth,
+because `esp_rtl_sdr_get_tuner_gain()` — the one call that could — was never
+invoked from `rtl_pipeline.c`.
+
+Three compounding causes:
+
+1. **Free entry for a stepped value.** The hardware has 29 settings, not 497.
+2. **Range validation instead of membership validation.** `0–496` is the wrong
+   question; "is this one of the 29?" is the right one.
+3. **The advertised ladder and the applied ladder disagreed.**
+   `esp_rtl_sdr_get_tuner_gains()` hard-coded the Blog V4 table (28 steps, no
+   48.0 dB) while `apply_profile_gain()` selects the table by dongle profile.
+   Validating against one ladder and applying the other is the same class of bug
+   as L36, one level deeper.
+
+**Fixes**
+
+- Gain is a `<select>` whose options are built from the firmware's ladder
+  (`gain_ladder` in `/api/settings`), so it cannot drift.
+- The API validates membership, not range, and rejects off-ladder values with a
+  400 naming the real reason.
+- `/api/settings` and `/api/status` report `gain_applied` — resolved against the
+  driver's own ladder, because the applied gain *is* the nearest real step.
+- `esp_rtl_sdr_get_tuner_gains()` is now profile-aware and returns exactly the
+  ladder that `apply_profile_gain()` snaps against.
+- All UI alert "fixes" route proposed gains through `snapGain()`: they work in
+  ±3 dB increments, and `421 - 30 = 391` is *not* a step — the fixes would have
+  reproduced the original 400.
+- `tests/web/check_ui_api.py` parses the ladder from `gain_r820t2.hpp` and
+  asserts the gain control is a dropdown, that the ladder is served, and that
+  **every** `gain ± N` expression in the UI is wrapped in `snapGain()`. The last
+  check exists because asserting only that `snapGain` is *defined* passed while
+  an un-snapped call site remained — verified by injecting both regressions and
+  confirming each one fails the suite.
+
+**Lesson:** when hardware quantises a value, validate *membership* and report
+what was actually applied — never what was requested. A UI and an API that
+merely echo the request will happily agree with each other and both be wrong.
+
+**Rule:** before trusting a setting, ask what value the hardware will actually
+end up with, and make that observable. When a component can answer that
+question, call it; when it cannot, derive it from the same table the component
+uses so the two cannot drift.

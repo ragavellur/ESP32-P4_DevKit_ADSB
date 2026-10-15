@@ -196,7 +196,7 @@
         <span id="settingsToggleBtn">[+]</span>
     </div>
     <div id="settings-content">
-        <div class="control-row"><span>Gain (tenth dB):</span> <input type="number" id="setGain" value="496" min="0" max="496"></div>
+        <div class="control-row"><span>Gain:</span> <select id="setGain" style="background: #000; border: 1px solid #00ff41; color: #00ff41; font-family: Courier New, monospace; font-size: 12px; padding: 2px 5px;"><option value="421">42.1 dB</option></select></div>
         <div class="control-row"><span>DC Filter:</span>
             <label class="switch">
                 <input type="checkbox" id="setDcFilter">
@@ -819,12 +819,59 @@ function settingsPayload() {
     };
 }
 
+    /* Gain is a dropdown, not a free field. The options come from the firmware's
+ * real tuner register ladder (/api/settings gain_ladder) so the UI can never
+ * offer a value the hardware would silently snap. A request for 391 was
+ * applied as 386 - 3.5 dB below optimum - while every surface reported 391
+ * (LEARNING L37). */
+const DEFAULT_GAIN = 421;
+
+// Ladder of real tuner register steps, refreshed from /api/settings.
+let GAIN_LADDER = [];
+
+// Snap an arbitrary dB value to the nearest REAL tuner step. Alert fixes work
+// in +/-3 dB increments which frequently land between steps (421-30 = 391),
+// and the API now rejects anything that is not a step -- so every suggested fix
+// must be snapped or it would 400 exactly like the old sample-rate bug (L37).
+function snapGain(tenth) {
+    if (!GAIN_LADDER.length) return tenth;
+    let best = GAIN_LADDER[0];
+    GAIN_LADDER.forEach(function (g) {
+        if (Math.abs(g - tenth) < Math.abs(best - tenth)) best = g;
+    });
+    return best;
+}
+
+function buildGainDropdown(sel, ladder, current, applied) {
+    if (!sel) return;
+    if (!ladder || !ladder.length) ladder = [DEFAULT_GAIN];
+    GAIN_LADDER = ladder.slice();
+    // If the stored/applied value is not a real step, show the nearest one
+    // that is, so the dropdown never renders a bogus selection.
+    let val = applied || current;
+    if (ladder.indexOf(val) === -1) {
+        let best = ladder[0];
+        ladder.forEach(function (g) {
+            if (Math.abs(g - val) < Math.abs(best - val)) best = g;
+        });
+        val = best;
+    }
+    sel.innerHTML = "";
+    ladder.forEach(function (g) {
+        const o = document.createElement("option");
+        o.value = String(g);
+        o.textContent = (g / 10).toFixed(1) + " dB";
+        if (g === val) o.selected = true;
+        sel.appendChild(o);
+    });
+}
+
     async function loadSettings() {
         try {
             const r = await fetch("/api/settings");
             if (!r.ok) throw new Error("HTTP " + r.status);
             const s = await r.json();
-            if (settingsForm.gain) settingsForm.gain.value = s.gain;
+            buildGainDropdown(settingsForm.gain, s.gain_ladder, s.gain, s.gain_applied);
             if (settingsForm.dcFilter) settingsForm.dcFilter.checked = s.dc_filter;
             if (settingsForm.gainMode) {
                 const gm = s.gain_mode;
@@ -1040,14 +1087,14 @@ function evaluateAlerts(s) {
     const streaming = (s.phase === "streaming") && s.device_present;
 
     if (s.rf_state === 4) {
-        const t = gain != null ? Math.max(0, gain - 30) : 350;
+        const t = snapGain(gain != null ? gain - 30 : 350);
         alerts.push({ key: "clip", icon: "!", title: "RF OVERLOAD (clipping)",
             desc: "The tuner is saturating the ADC. Near full-scale samples raise the noise floor and can mask weak frames from distant aircraft.",
             fix: { gain: t, gain_mode: 0 },
             fixText: "Lower gain to " + tenthsToDb(t) + " dB" + (gain != null ? " (now " + tenthsToDb(gain) + " dB)" : "") + "." });
     }
     if (s.rf_state === 5) {
-        const t = gain != null ? Math.min(496, gain + 30) : 421;
+        const t = snapGain(gain != null ? gain + 30 : DEFAULT_GAIN);
         alerts.push({ key: "weak", icon: "!", title: "RF WEAK",
             desc: "Very low sample swing — the signal is too weak. Distant frames are not reaching the decoder.",
             fix: { gain: t, gain_mode: 0 },
@@ -1063,14 +1110,14 @@ function evaluateAlerts(s) {
     }
     if (streaming && drops > 0) {
         let fix = null, txt;
-        if (gain != null) { fix = { gain: Math.max(0, gain - 30), gain_mode: 0 }; txt = "Lower gain by 3 dB to cut false preambles and free up decode time."; }
+        if (gain != null) { fix = { gain: snapGain(gain - 30), gain_mode: 0 }; txt = "Lower gain by 3 dB to cut false preambles and free up decode time."; }
         else { txt = "The decoder cannot keep up. The sample rate is already at its only usable value."; }
         alerts.push({ key: "drops", icon: "!", title: "DECODER OVERLOAD (frames dropped)",
             desc: "The IQ ring is overflowing because the decoder cannot keep up, so whole blocks of samples are being discarded.",
             fix: fix, fixText: txt });
     }
     if (streaming && drops === 0 && overruns === 0 && ringWindow.filter(Boolean).length >= 5) {
-        const fix = gain != null ? { gain: Math.max(0, gain - 30), gain_mode: 0 } : null;
+        const fix = gain != null ? { gain: snapGain(gain - 30), gain_mode: 0 } : null;
         alerts.push({ key: "ring", icon: "i", severity: "info", title: "IQ BUFFER RUNNING HOT",
             desc: "The IQ ring has been full in " + ringWindow.filter(Boolean).length + " of the last " + ringWindow.length +
                   " checks. Nothing is dropped yet, but the decoder is right at its limit and a busier sky could tip it over.",
@@ -1080,7 +1127,7 @@ function evaluateAlerts(s) {
     if ((s.rf_state === 1 || s.rf_state === 0) && gain != null && gain >= 470) {
         alerts.push({ key: "highgain", icon: "!", severity: "warn", title: "GAIN NEAR MAXIMUM",
             desc: "Gain is at the top of the ladder. Bench measurements show ~42 dB gives the best range; pushing to the very top usually raises the noise floor and lowers the valid-frame rate without adding aircraft.",
-            fix: { gain: 421, gain_mode: 0 },
+            fix: { gain: DEFAULT_GAIN, gain_mode: 0 },
             fixText: "Set gain to 42.1 dB (~best range; less noise than maximum)." });
     }
     return alerts;
@@ -1136,7 +1183,9 @@ async function applyAlertFix() {
     // An alert fix must never reintroduce a rejected sample rate.
     body.sample_rate_sps = FIXED_SAMPLE_RATE;
     // Reflect the intended change in the settings form so it is visible.
-    settingsForm.gain.value = body.gain;
+    // The gain control is a <select>: assigning a value not present in its
+    // options is silently ignored, so rebuild it from the ladder first.
+    buildGainDropdown(settingsForm.gain, GAIN_LADDER, body.gain, body.gain);
     settingsForm.gainMode.value = String(body.gain_mode);
     settingsForm.sampleRate.value = String(body.sample_rate_sps);
     try {

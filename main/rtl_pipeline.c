@@ -796,6 +796,50 @@ esp_err_t rtl_pipeline_init(void)
     return ESP_OK;
 }
 
+size_t rtl_pipeline_get_gain_ladder(int *out_tenth_db, size_t max_count)
+{
+    if (!s_ctx.handle) {
+        return 0;
+    }
+    size_t count = 0;
+    if (esp_rtl_sdr_get_tuner_gains(s_ctx.handle, out_tenth_db, max_count,
+                                    &count) != ESP_OK) {
+        return 0;
+    }
+    return count;
+}
+
+bool rtl_pipeline_get_applied_gain(int *out_tenth_db)
+{
+    if (out_tenth_db == nullptr) {
+        return false;
+    }
+    /* The tuner can only be at a real register step. The driver snaps any
+     * request to the nearest one, so the applied gain IS the nearest ladder
+     * step to what we asked for. We resolve it against the driver's own ladder
+     * (rather than the driver's handle->gain_tenth_db, which is only updated
+     * on some apply paths and read back as 0 after a reopen) so the reported
+     * value always matches what the hardware can actually do, and cannot drift
+     * from the ladder the API validates against. */
+    int ladder[64];
+    const size_t n = rtl_pipeline_get_gain_ladder(ladder, 64);
+    if (n == 0) {
+        *out_tenth_db = s_settings.gain_tenth_db;
+        return false;
+    }
+    const int want = s_settings.gain_tenth_db;
+    int best = ladder[0];
+    for (size_t i = 0; i < n; ++i) {
+        const int d = ladder[i] - want;
+        const int bd = best - want;
+        if ((d < 0 ? -d : d) < (bd < 0 ? -bd : bd)) {
+            best = ladder[i];
+        }
+    }
+    *out_tenth_db = best;
+    return true;
+}
+
 void rtl_pipeline_get_status(rtl_pipeline_status_t *out)
 {
     if (!out) return;
@@ -883,7 +927,15 @@ void rtl_pipeline_get_debug(rtl_pipeline_debug_t *out)
 
     out->programmed_sps = s_settings.sample_rate_sps;
     out->preamble_threshold = ADSB_PREAMBLE_THRESHOLD;
-    out->gain_tenth_db = s_settings.gain_tenth_db;
+    /* Report the gain the tuner is ACTUALLY running, not what was requested.
+     * The driver snaps to the nearest real register step (391 -> 386), so
+     * reporting the request made every consumer believe a gain was in effect
+     * that the hardware never applied (LEARNING L37). */
+    int applied_gain = 0;
+    if (!rtl_pipeline_get_applied_gain(&applied_gain)) {
+        applied_gain = s_settings.gain_tenth_db;
+    }
+    out->gain_tenth_db = applied_gain;
     out->gain_mode = (uint8_t)s_settings.gain_mode;
     out->dc_filter = s_settings.dc_filter;
     out->crc_fix = s_settings.crc_fix;

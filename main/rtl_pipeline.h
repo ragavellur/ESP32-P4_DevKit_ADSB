@@ -130,6 +130,20 @@ void rtl_pipeline_get_settings(int *gain_tenth_db, _Bool *dc_filter, _Bool *adap
                                 gain_mode_t *gain_mode, _Bool *aggressive, _Bool *crc_fix,
                                 uint32_t *sample_rate_sps);
 
+/* Gain ladder actually supported by the connected tuner's register table
+ * (e.g. R820T2: 0, 9, 14 ... 496 in tenths of dB). Returns the count, or 0
+ * if no device is present. The UI builds its dropdown from this so the two
+ * can never drift. */
+size_t rtl_pipeline_get_gain_ladder(int *out_tenth_db, size_t max_count);
+
+/* Gain the hardware is ACTUALLY running, in tenths of dB.
+ *
+ * This is not the same as the requested setting: esp_rtl_sdr_set_tuner_gain()
+ * snaps to the nearest real register step, so a request for 391 becomes 386.
+ * Reporting the requested value made the UI/API lie about the tuner (LEARNING
+ * L37). Returns false if the driver cannot be read. */
+bool rtl_pipeline_get_applied_gain(int *out_tenth_db);
+
 #ifdef __cplusplus
 }
 #endif
