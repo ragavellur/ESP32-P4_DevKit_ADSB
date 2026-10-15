@@ -149,6 +149,8 @@ committed, or pasted into issue/PR text. Use environment variables or local-only
 - `docs/IMPLEMENTATION_PLAN.md` — architecture and component design
 - `docs/TASKS_TRACKER.md` — current phase/task status and platform notes
 - `docs/LEARNING.md` — read this first; it will save you hours
+- `docs/SDR_Finetune_task.md` — external reference study (jstockdale/T-Display-P4
+  `adsb` branch): memory/core/DSP comparison, what to adopt vs reject, follow-ups
 
 ### 5.2a UI/API contract check (run before every flash)
 

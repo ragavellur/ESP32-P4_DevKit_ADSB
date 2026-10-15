@@ -548,3 +548,41 @@ bad field into a total failure.
 check must live in the pre-flash gate. A test that cannot fail is not a test, so
 both failure modes above were injected deliberately to confirm the guard actually
 catches them before the fix was accepted.
+
+## L36 — Two decoders, two sample rates; "the rate doesn't work" is decoder-specific
+
+While comparing against the jstockdale/T-Display-P4 ADS-B receiver
+(`docs/SDR_Finetune_task.md`), a fact surfaced that undercuts how we recorded
+our own rate experiment.
+
+That project decodes ADS-B successfully at **2.0 MSPS** using the classic
+dump1090/Multilateration `mode_s.c`. We run **2.4 MSPS** using readsb's
+`demodulate2400`. Both assume an *exact* sample rate and compute preamble and
+bit offsets as fixed integer multiples of the sample period:
+
+- `demodulate2400` hard-codes 2.4 MHz
+- `mode_s.c` hard-codes 2.0 MHz (its comment: *"since we are sampling at 2 Mhz
+  every sample in our magnitude vector is 0.5 usec"*)
+
+At 2.048 MHz — 2.4% above 2.0 — sample positions drift roughly 2.7 slots across a
+112-bit message, which destroys correlation. So our measured result
+
+| Rate | readsb CRC |
+|---|---|
+| 2,048,000 | 0 |
+| 2,400,000 | 780 |
+
+does **not** show that the R820T2 cannot decode at ~2.0 MSPS. It shows that
+*readsb's 2.4 MHz detector* cannot. The generalisation in our docs — "2.048 MSPS
+does not decode ADS-B on this R820T2" — is too strong and should be read as
+"2.048 does not decode with a 2.4 MHz detector."
+
+**Lesson:** a rate experiment is always a joint experiment in *rate and decoder*.
+Changing one while holding the other fixed tests a different thing than it
+appears to.
+
+**Rule:** before concluding a hardware limitation from a software experiment,
+check whether any other decoder is native to the rate you want. Note also that
+the two decoders use **different magnitude scales** (×360 vs our ×415) and
+different preamble thresholds, so nothing is drop-in interchangeable — an
+intensity constant that works in one is wrong in the other.
