@@ -156,6 +156,7 @@ typedef struct {
     /* adsb_dsp CPU accounting (DSP task writes, status task snapshots). */
     volatile uint64_t dsp_busy_us;
     volatile uint64_t dsp_samples;
+    volatile uint32_t ring_drops;      /* IQ blocks discarded: ring full */
     uint64_t base60_dsp_busy_us;
     uint64_t base60_dsp_samples;
 } rtl_ctx_t;
@@ -450,7 +451,11 @@ static void on_event(esp_rtl_sdr_event_t event, const void *payload, void *ctx)
         }
         uint32_t idx = ring_take_free();
         if (idx == UINT32_MAX) {
-            break; /* consumer overload; driver counts its own overruns */
+            /* The decoder could not keep up. This block is genuinely lost, and
+             * the driver does NOT count it (its overrun counter only covers its
+             * own queue), so count it here or the loss is invisible. */
+            s_ctx.ring_drops++;
+            break;
         }
         memcpy(s_ctx.slots[idx].data, blk->data, blk->bytes);
         s_ctx.slots[idx].bytes = blk->bytes;
@@ -681,6 +686,7 @@ static void rtl_driver_task(void *arg)
     s_ctx.installed = true;
     ESP_LOGI(PIPELINE_TAG, "driver installed");
 
+
     /* Wait for device accept / ready (either event or state poll). */
     TickType_t deadline = xTaskGetTickCount() + ENUM_TIMEOUT_TICK;
     while (!s_ctx.device_present && xTaskGetTickCount() < deadline) {
@@ -796,17 +802,25 @@ esp_err_t rtl_pipeline_init(void)
     return ESP_OK;
 }
 
+/* Serves the ladder already declared in this file (s_gain_ladder).
+ *
+ * This MUST NOT query the driver: /api/status and /api/debug are polled every
+ * 3 s, and esp_rtl_sdr_get_tuner_gains() takes a HandleLock. With the decoder
+ * running at full speed that lock stopped being granted promptly and the
+ * entire web server wedged ("connection reset by peer" after ~16 ms), taking
+ * the radar UI and settings API offline while the receiver itself kept
+ * decoding fine (LEARNING L38). */
 size_t rtl_pipeline_get_gain_ladder(int *out_tenth_db, size_t max_count)
 {
-    if (!s_ctx.handle) {
+    const size_t n = S_GAIN_LADDER_COUNT;
+    if (out_tenth_db == nullptr) {
         return 0;
     }
-    size_t count = 0;
-    if (esp_rtl_sdr_get_tuner_gains(s_ctx.handle, out_tenth_db, max_count,
-                                    &count) != ESP_OK) {
-        return 0;
+    const size_t m = (max_count < n) ? max_count : n;
+    for (size_t i = 0; i < m; ++i) {
+        out_tenth_db[i] = s_gain_ladder[i].tenth_db;
     }
-    return count;
+    return m;
 }
 
 bool rtl_pipeline_get_applied_gain(int *out_tenth_db)
@@ -862,6 +876,7 @@ void rtl_pipeline_get_status(rtl_pipeline_status_t *out)
     out->overrun_cnt = s_ctx.metrics.overruns;
     out->consumer_drops = s_ctx.metrics.consumer_drops;
     out->ring_free_slots = uxQueueMessagesWaiting(s_ctx.free_q);
+    out->ring_drops = s_ctx.ring_drops;
     out->frame_cnt = s_ctx.frame_cnt;
     out->crc_ok_cnt = s_ctx.crc_ok;
     out->track_count = s_ctx.track_count;

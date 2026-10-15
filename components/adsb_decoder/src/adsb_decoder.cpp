@@ -26,6 +26,46 @@ uint32_t crc_payload(const uint8_t* frame, int data_bits) {
   return crc;
 }
 
+uint32_t syndrome_of(const uint8_t* frame, int data_bits) {
+  return crc_payload(frame, data_bits) ^ bits(frame, data_bits, 24);
+}
+
+/* Syndrome signature of every bit position, for DF17 (112 bit) and DF11
+ * (56 bit).
+ *
+ * The Mode-S CRC is linear, so flipping bit i XORs the syndrome by a constant
+ * that depends only on i. Precomputing that constant turns single-bit error
+ * correction from "recompute a whole CRC for each of the 112 bits" (~12,500
+ * iterations per failed message) into "one CRC plus a table scan" (~200).
+ *
+ * That difference is not a micro-optimisation: the old loop cost roughly 20x
+ * the entire rest of the decoder, which starved the IQ ring and threw away
+ * ~93% of the incoming samples whenever crc_fix was enabled (LEARNING L38).
+ */
+struct BitSignatureTable {
+  uint32_t sig17[112];
+  uint32_t sig11[56];
+
+  BitSignatureTable() {
+    uint8_t tmp[14];
+    for (int i = 0; i < 112; ++i) {
+      std::memset(tmp, 0, sizeof(tmp));
+      tmp[i / 8] = static_cast<uint8_t>(0x80u >> (i % 8));
+      sig17[i] = syndrome_of(tmp, 112 - 24);
+    }
+    for (int i = 0; i < 56; ++i) {
+      std::memset(tmp, 0, sizeof(tmp));
+      tmp[i / 8] = static_cast<uint8_t>(0x80u >> (i % 8));
+      sig11[i] = syndrome_of(tmp, 56 - 24);
+    }
+  }
+};
+
+const BitSignatureTable& bit_signatures() {
+  static const BitSignatureTable table;
+  return table;
+}
+
 
 
 bool parse(const uint8_t* bytes, uint8_t bit_length, uint16_t signal, Frame* out) {
@@ -93,28 +133,40 @@ bool parse(const uint8_t* bytes, uint8_t bit_length, uint16_t signal, Frame* out
   return true;
 }
 
-// Try to fix single-bit CRC error by flipping each bit
+// Try to fix a single-bit CRC error.
+//
+// A linear CRC means the syndrome delta of flipping a bit is a constant, so we
+// compute the syndrome ONCE and scan a precomputed signature table for the bit
+// that produces it, instead of recomputing the full CRC for every candidate bit.
 bool try_crc_fix(uint8_t* bytes, int bit_length, Frame* out) {
-  uint8_t original[14];
-  std::memcpy(original, bytes, bit_length / 8);
-  
+  if (bit_length != 112 && bit_length != 56) {
+    return false;
+  }
+  const int data_bits = bit_length - 24;
+  const uint32_t syndrome = syndrome_of(bytes, data_bits);
+  if (syndrome == 0) {
+    return false; // Already valid; nothing to correct.
+  }
+
+  const BitSignatureTable& table = bit_signatures();
+  const uint32_t* sig = (bit_length == 112) ? table.sig17 : table.sig11;
+
   for (int bit = 0; bit < bit_length; ++bit) {
-    // Flip bit
-    bytes[bit / 8] ^= (0x80u >> (bit % 8));
-    
-    // Check CRC
-    const uint8_t df = bytes[0] >> 3;
-    const int data_bits = bit_length - 24;
-    const uint32_t syndrome = crc_payload(bytes, data_bits) ^ bits(bytes, data_bits, 24);
-    
-    if ((df == 17 && bit_length == 112 && syndrome == 0) ||
-        (df == 11 && bit_length == 56 && syndrome <= 0x7f)) {
-      // CRC fixed! Parse the corrected frame
-      return parse(bytes, bit_length, 0, out);
+    const uint32_t after = syndrome ^ sig[bit];
+    const uint8_t mask = static_cast<uint8_t>(0x80u >> (bit % 8));
+    // DF is read AFTER the flip, matching the original brute-force behaviour.
+    const uint8_t df_after =
+        static_cast<uint8_t>((bytes[0] ^ (bit < 8 ? mask : 0u)) >> 3);
+    const bool ok = (df_after == 17 && bit_length == 112 && after == 0) ||
+                    (df_after == 11 && bit_length == 56 && after <= 0x7fu);
+    if (!ok) {
+      continue;
     }
-    
-    // Restore and try next bit
-    std::memcpy(bytes, original, bit_length / 8);
+    bytes[bit / 8] ^= mask;
+    if (parse(bytes, bit_length, 0, out)) {
+      return true;
+    }
+    bytes[bit / 8] ^= mask; // restore and keep looking
   }
   return false;
 }

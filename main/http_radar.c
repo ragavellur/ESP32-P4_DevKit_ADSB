@@ -134,7 +134,7 @@ static void put_status_json(char *buf, size_t cap)
     snprintf(buf, cap,
         "{\"now\":%llu,\"phase\":\"%s\",\"device_present\":%s,"
         "\"decode_ok\":%s,\"effective_sps\":\"%lu\",\"programmed_sps\":\"%lu\","
-        "\"overruns\":\"%lu\",\"drops\":\"%lu\",\"ring_free\":\"%lu\","
+        "\"overruns\":\"%lu\",\"drops\":\"%lu\",\"ring_drops\":\"%lu\",\"ring_free\":\"%lu\","
         "\"crc_ok\":\"%lu\",\"tracks\":\"%lu\","
         "\"gain_tenth_db\":%d,\"gain_mode\":%u,\"rf_state\":%u,"
         "\"sample_min\":%d,\"sample_max\":%d,"
@@ -144,6 +144,7 @@ static void put_status_json(char *buf, size_t cap)
         phase, dev, dec,
         (unsigned long)st.effective_sps, (unsigned long)st.programmed_sps,
         (unsigned long)st.overrun_cnt, (unsigned long)st.consumer_drops,
+        (unsigned long)st.ring_drops,
         (unsigned long)st.ring_free_slots,
         (unsigned long)st.crc_ok_cnt, (unsigned long)st.track_count,
         (int)st.gain_tenth_db, (unsigned)st.gain_mode, (unsigned)st.rf_state,
@@ -189,7 +190,7 @@ static esp_err_t h_debug(httpd_req_t *req)
         "\"sample_max\":%u},"
         "\"health\":{\"usb\":%u,\"rf\":%u,\"overall\":%u,"
         "\"efficiency\":%.3f,\"advice\":\"%s\"},"
-        "\"pipe\":{\"overruns\":%lu,\"drops\":%lu,\"ring_free\":%lu},"
+        "\"pipe\":{\"overruns\":%lu,\"driver_drops\":%lu,\"ring_drops\":%lu,\"ring_free\":%lu},"
         "\"dsp\":{\"busy_pct\":%.1f,\"samples_per_s\":%.0f,\"required_sps\":%lu}}",
         (unsigned long long)(esp_timer_get_time() / 1000),
         st.phase == RTL_PIPELINE_STREAMING ? "streaming" :
@@ -215,6 +216,7 @@ static esp_err_t h_debug(httpd_req_t *req)
         (unsigned)d.health_usb, (unsigned)d.health_rf, (unsigned)d.health_overall,
         (double)d.health_efficiency, d.advice,
         (unsigned long)st.overrun_cnt, (unsigned long)st.consumer_drops,
+        (unsigned long)st.ring_drops,
         (unsigned long)st.ring_free_slots,
         (double)d.dsp_busy_pct, (double)d.dsp_samples_per_s,
         (unsigned long)d.programmed_sps);

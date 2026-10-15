@@ -50,6 +50,7 @@ typedef struct {
     uint32_t overrun_cnt;            /**< driver USB overruns */
     uint32_t consumer_drops;         /**< ring overflow drops (app side) */
     uint32_t ring_free_slots;        /**< free IQ ring slots right now */
+    uint32_t ring_drops;             /**< IQ blocks DISCARDED because the ring was full */
     uint32_t frame_cnt;              /**< decoder frames seen (cumulative) */
     uint32_t crc_ok_cnt;             /**< decoder frames with valid CRC */
     uint32_t track_count;            /**< live aircraft tracks (1 Hz refresh) */

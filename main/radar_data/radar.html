@@ -1075,6 +1075,7 @@ let currentAlert = null;
 let alertDetailOpen = false;
 let alertDismissedKey = null;
 let ringWindow = [];
+let lastRingDrops = 0;
 
 function tenthsToDb(v) { return (v / 10).toFixed(1); }
 
@@ -1117,13 +1118,15 @@ function evaluateAlerts(s) {
             fix: fix, fixText: txt });
     }
     if (streaming && drops === 0 && overruns === 0 && ringWindow.filter(Boolean).length >= 5) {
-        const fix = gain != null ? { gain: snapGain(gain - 30), gain_mode: 0 } : null;
-        alerts.push({ key: "ring", icon: "i", severity: "info", title: "IQ BUFFER RUNNING HOT",
-            desc: "The IQ ring has been full in " + ringWindow.filter(Boolean).length + " of the last " + ringWindow.length +
-                  " checks. Nothing is dropped yet, but the decoder is right at its limit and a busier sky could tip it over.",
-            fix: fix,
-            fixText: "Optionally lower gain by 3 dB to reduce the decode workload." });
+        alerts.push({ key: "ring", icon: "i", severity: "info", title: "IQ BUFFER OVERFLOWING",
+            desc: "IQ blocks are being DISCARDED because the decoder cannot keep up (" +
+                  ringWindow.filter(Boolean).length + " of the last " + ringWindow.length +
+                  " checks). Lowering gain does not help this: fewer weak signals would be " +
+                  "dropped, but the decoder is CPU-bound, not signal-bound.",
+            fix: null,
+            fixText: "This is a decode-throughput limit, not a signal problem." });
     }
+
     if ((s.rf_state === 1 || s.rf_state === 0) && gain != null && gain >= 470) {
         alerts.push({ key: "highgain", icon: "!", severity: "warn", title: "GAIN NEAR MAXIMUM",
             desc: "Gain is at the top of the ladder. Bench measurements show ~42 dB gives the best range; pushing to the very top usually raises the noise floor and lowers the valid-frame rate without adding aircraft.",
@@ -1211,8 +1214,13 @@ function pollHealth() {
         .then(r => r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)))
         .then(s => {
             lastStatus = s;
-            const free = parseInt(s.ring_free, 10) || 0;
-            ringWindow.push(free === 0 ? 1 : 0);
+            // ring_free sits at 0 whenever the ring is merely busy, which is
+            // normal. The honest signal is whether we are DISCARDING blocks,
+            // so key the alert off the ring_drops counter instead.
+            const d = lastDbg && lastDbg.pipe ? lastDbg.pipe : null;
+            const dropsNow = d ? (parseInt(d.ring_drops, 10) || 0) : lastRingDrops;
+            ringWindow.push(dropsNow > lastRingDrops ? 1 : 0);
+            lastRingDrops = dropsNow;
             if (ringWindow.length > 10) ringWindow.shift();
             renderAlert();
         })

@@ -645,3 +645,80 @@ merely echo the request will happily agree with each other and both be wrong.
 end up with, and make that observable. When a component can answer that
 question, call it; when it cannot, derive it from the same table the component
 uses so the two cannot drift.
+
+## L38 — An O(n·bits) "optimisation" can cost 20x the entire decoder
+
+### The symptom
+
+`crc_fix` was reported as an ordinary boolean and behaved like a landmine:
+
+| | crc/s | preambles/min | stream decoded |
+|---|---|---|---|
+| `crc_fix` ON | 0.63 | 38–52 | **4–5%** |
+| `crc_fix` OFF | **12.95** | **777** | **82%** |
+
+A ~20x difference from one checkbox.
+
+### Root cause
+
+`try_crc_fix()` looped over all 112 bit positions and, for **each** one,
+recomputed the whole CRC from scratch:
+
+```c
+for (int bit = 0; bit < bit_length; ++bit) {
+    bytes[bit/8] ^= (1 << (7 - bit%8));
+    const uint32_t syndrome = crc_payload(bytes, data_bits)   // 88 iterations
+                              ^ bits(bytes, data_bits, 24);   // 24 iterations
+    ...
+}
+```
+
+That is 112 x 112 ~= **12,500 iterations per failed message**. On a weak sky
+most preambles fail CRC, so this ran constantly and consumed roughly **20x more
+CPU than the entire rest of the decoder**.
+
+The feeder/ringer then saturated and **93.4% of the incoming IQ was silently
+discarded** at `rtl_pipeline.c`:
+
+```c
+if (idx == UINT32_MAX) {
+    break; /* consumer overload; driver counts its own overruns */
+}
+```
+
+...which the driver does **not** count — its counter only covers its own queue.
+So `/api/debug` reported `drops=0` while nine tenths of the signal was being
+thrown away. Nobody could see it.
+
+### The fix
+
+A CRC is linear, so flipping bit *i* XORs the syndrome by a **constant** that
+depends only on *i*. Precomputing those 112 signatures turns the correction from
+"one CRC per bit" into "one CRC plus a table scan" — about **60x cheaper**, with
+identical output. Verified by a differential test against the original
+implementation over 200,000 random and deliberately corrupted frames: **all
+200,000 byte-identical**, including the DF11 case where a short (<=0x7F) AP
+residue is legal and the DF field is read *after* the flip.
+
+### The real lesson
+
+The IQ ring alert ("ring has been full in 6 of last 6 checks") had been firing
+permanently and was being read as "the decoder is near its limit". It was not a
+warning — it was a **constant state** caused by one slow function, and it was
+masked by a counter that could never move.
+
+**Rule:** never let a path discard data without counting it. A drop counter that
+is always zero is worse than none, because it converts a real fault into a
+false all-clear. And when a "cheap" fixup (bit error correction) costs more than
+the thing it protects, it is not a fixup — measure it end to end, not just the
+frames it salvages.
+
+### Also fixed here
+
+`rtl_pipeline_get_gain_ladder()` called `esp_rtl_sdr_get_tuner_gains()` on every
+`/api/status` and `/api/debug` poll, taking a driver `HandleLock` from the HTTP
+task. With the decoder finally running at full speed that lock stopped being
+granted promptly and **the entire web server wedged** (`connection reset by
+peer` after ~16 ms) while the receiver kept decoding. The ladder is a compile-time
+table in `rtl_pipeline.c` already; serve it from there. **Never take a driver
+lock on a polled HTTP path.**
