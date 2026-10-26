@@ -469,6 +469,7 @@ void Decoder::process_pairs(const uint8_t* data, size_t pairs, FrameCallback cal
       const uint8_t df = best.bytes[0] >> 3;
       if (df == 17) ++stats_.df17;
       ++stats_.crc_ok;
+      best.preamble_offset_samples = static_cast<uint32_t>(pos);
       if (callback) callback(best, context);
       /* Skip most of the message so we don't re-decode it at every bit
        * offset (readsb: pa += msglen * 8 / 4). */

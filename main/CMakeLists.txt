@@ -20,4 +20,5 @@ idf_component_register(
         nvs_flash
         lwip
         log
+        mlat_client
 )

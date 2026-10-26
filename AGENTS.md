@@ -118,10 +118,33 @@ idf.py build
 # Release the serial port if a monitor is holding it
 lsof /dev/cu.usbmodem5B900947191      # find the serial-mon... PID
 kill <PID>
-
-# Flash + monitor
-idf.py -p /dev/cu.usbmodem5B900947191 flash monitor
 ```
+
+### 6.0 Pre-Flash (MANDATORY)
+1. **Connect USB** - The device MUST be connected via USB before flashing. Do NOT flash without asking the user to connect it first.
+2. **Verify port** - Check `/dev/cu.usbmodem*` exists before running flash.
+
+```sh
+# Flash (only when USB connected)
+idf.py -p /dev/cu.usbmodem5B900947191 flash
+```
+
+### 6.1 Post-Flash Deployment (MANDATORY)
+
+**After every `idf.py flash`:**
+
+1. **Disconnect USB** - Unplug the USB cable immediately after flashing. The device must NOT remain connected to USB for RF operation/testing.
+2. **Move to operational location** - Take the device to the terrace/location where the antenna is installed and connect the antenna properly.
+3. **Power on normally** - Power the device via its normal power source (Ethernet/PSU). It will connect to the network on its own.
+4. **Verify over HTTP only** - Do NOT reconnect USB for verification. Use the HTTP APIs from another device on the same network:
+   - `GET http://<device-ip>/api/status` - Check `phase`, `crc_ok`, `tracks`, `rf_state`
+   - `GET http://<device-ip>/api/frames` - Check for decoded frames
+   - `GET http://<device-ip>/api/feeder` - BharatRadar BEAST feeder status
+   - `GET http://<device-ip>/api/mlat` - MLAT client status/stats
+   - `GET http://<device-ip>/data/aircraft.json` - Tracked aircraft
+5. **Config is HTTP-based** - MLAT, feeder, and most settings can be changed via HTTP POST. NVS persists config across reboots/flashes. USB is only needed for firmware flashing/major debugging.
+
+**Rule:** Never flash and immediately test RF while USB is attached with antenna disconnected. Always follow this sequence.
 
 **Hardware facts (do not rediscover the hard way):**
 - Board is silicon **rev v1.3** → must keep `ESP32P4_SELECTS_REV_LESS_V3=y` and CPU **360 MHz**.

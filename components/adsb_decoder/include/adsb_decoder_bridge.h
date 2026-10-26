@@ -14,7 +14,16 @@ extern "C" {
 
 bool adsb_decoder_bridge_init(void);         /* boot self-check; true on pass */
 void adsb_decoder_bridge_reset(void);        /* full reset incl. app counters */
+/* Block timing context for MLAT timestamping */
+typedef struct {
+    uint64_t block_start_sample;
+    int64_t  block_time_us;
+    uint32_t sample_rate_sps;
+} adsb_decoder_block_ctx_t;
+
 void adsb_decoder_bridge_process(const uint8_t* cu8, size_t bytes);
+void adsb_decoder_bridge_process_with_ctx(const uint8_t* cu8, size_t bytes,
+                                          const adsb_decoder_block_ctx_t* ctx);
 const char* adsb_decoder_bridge_last_error(void); /* stable string; "" if none */
 
 typedef struct {
@@ -36,6 +45,9 @@ typedef struct {
     uint8_t  bytes[14];
     uint8_t  bit_length;      /**< 56 (DF11) or 112 (DF17) */
     int64_t  rx_timestamp_us; /**< esp_timer at decode */
+    int64_t  rx_timestamp_sample_us; /**< estimated reception time from sample stream (0 if unknown) */
+    uint64_t sample_index;    /**< sample index at reception estimate (0 if unknown) */
+    uint32_t preamble_offset_samples; /**< preamble offset in magnitudes buffer */
 } adsb_captured_frame_t;
 
 /**
@@ -70,7 +82,13 @@ typedef struct {
      * than decoded fields. bytes[] is only valid for bit_length/8 bytes. */
     uint8_t  bytes[14];
     uint8_t  bit_length;   /* 56 (DF11) or 112 (DF17) */
-    int64_t  rx_timestamp_us; /* esp_timer at decode, for the 12 MHz stamp */
+    int64_t  rx_timestamp_us; /* esp_timer at decode (legacy) */
+    /* Sample-derived reception time for MLAT (preferred). */
+    int64_t  rx_timestamp_sample_us;
+    uint64_t sample_index;
+    uint32_t sample_rate_sps;
+    /* Preamble sample offset within magnitudes buffer (for timestamp accuracy) */
+    uint32_t preamble_offset_samples;
 } adsb_frame_info_t;
 
 typedef void (*adsb_frame_hook_t)(const adsb_frame_info_t* f, void* ctx);
