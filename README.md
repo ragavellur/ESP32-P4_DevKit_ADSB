@@ -438,3 +438,35 @@ UI. That obligation is likely to apply to the combined firmware as a whole.
 `docs/LEARNING.md` records the non-obvious traps: task starvation, the 2.048 MSPS
 dead end, a web-server route cap that silently killed the whole UI, and a lwIP
 boot-order assert. Reading it first will save significant time.
+
+## MLAT (BharatRadar)
+
+The device now includes a native ESP-IDF MLAT client for [BharatRadar](https://bharatradar.com).
+
+- **Server**: `feed.bharatradar.com:31090` (TCP, newline-delimited JSON)
+- **Handshake**: Top-level JSON `{"version":3,"user":"<UUID>","uuid":"<UUID>","client_version":"esp32p4-mlat/1.0","lat":...,"lon":...,"alt":...,"compress":["none"],"clock_type":"radarcape_12mhz"}`
+- **Timestamps**: Uses preamble sample offsets from the decoder for accurate reception timestamps (converted to 12 MHz units). Falls back to decode-time if unavailable.
+- **Configuration**: HTTP API only (no USB needed after flashing). Persists in NVS.
+- **Default**: Disabled. Auto-starts on boot if enabled.
+
+### API
+
+```bash
+# Get MLAT status
+curl http://<device-ip>/api/mlat
+
+# Configure and enable MLAT (use same UUID as BharatRadar feeder)
+curl -X POST http://<device-ip>/api/mlat \
+  -H "Content-Type: application/json" \
+  -d '{"enabled":true,"host":"feed.bharatradar.com","port":31090,"uuid":"<YOUR-UUID>","station_name":"pune-radar","lat":18.480856,"lon":73.898264,"alt_m":625.0,"privacy":false,"return_results":false}'
+```
+
+### Verification
+- `/api/mlat` shows `connected`, `frames_submitted`, `frames_ts_preamble`, `frames_ts_fallback`
+- `/api/frames` includes `t_sample_us`, `sample_idx`, `preamble_off` for debugging
+- Check sync on BharatRadar: `https://mlat.bharatradar.com/synctable/feeder.html?0A&<UUID>`
+
+### Notes
+- Use the same feeder UUID as configured in `/api/feeder` (already feeding ADS-B to BharatRadar)
+- USB only needed for firmware flashing; all config is HTTP-based
+- After flashing, disconnect USB and move to terrace with antenna - verify over HTTP only
