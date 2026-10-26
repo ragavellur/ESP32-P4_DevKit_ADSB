@@ -13,6 +13,7 @@
 #include "adsb_decoder_bridge.h"
 #include "adsb_state.h"
 #include "beast_feeder.h"
+#include "mlat_client.h"
 #include "esp_log.h"
 #include "nvs.h"
 
@@ -109,10 +110,15 @@ typedef struct {
 
 static radar_settings_t s_settings;
 
+#include <inttypes.h>
+
 typedef struct {
     uint8_t *data;
     size_t bytes;
     uint32_t sequence;
+    uint64_t block_start_sample;
+    int64_t block_time_us;
+    uint32_t sample_rate_sps;
 } iq_slot_t;
 
 typedef struct {
@@ -159,6 +165,9 @@ typedef struct {
     volatile uint32_t ring_drops;      /* IQ blocks discarded: ring full */
     uint64_t base60_dsp_busy_us;
     uint64_t base60_dsp_samples;
+    /* MLAT timing: continuous sample counter for block alignment */
+    uint64_t mlat_sample_counter;
+    int64_t mlat_last_block_us;
 } rtl_ctx_t;
 
 static rtl_ctx_t s_ctx;
@@ -393,6 +402,14 @@ static void on_frame_hook(const adsb_frame_info_t *f, void *ctx)
     /* Hand the raw frame to the BharatRadar feeder first: it only enqueues
      * into a lock-free ring, so it costs the decode core almost nothing. */
     beast_feeder_push(f->bytes, f->bit_length, f->rx_timestamp_us);
+    /* MLAT: push timestamped observation (sample-derived preferred) */
+    mlat_client_push_frame(f->bytes, f->bit_length,
+                           f->rx_timestamp_us,
+                           f->rx_timestamp_sample_us,
+                           f->sample_index,
+                           f->sample_rate_sps,
+                           f->preamble_offset_samples,
+                           f->icao);
     bridge_to_state(f, (uint32_t)(esp_timer_get_time() / 1000));
 }
 
@@ -460,6 +477,15 @@ static void on_event(esp_rtl_sdr_event_t event, const void *payload, void *ctx)
         memcpy(s_ctx.slots[idx].data, blk->data, blk->bytes);
         s_ctx.slots[idx].bytes = blk->bytes;
         s_ctx.slots[idx].sequence = blk->sequence;
+        /* MLAT timing metadata */
+        int64_t tnow_m = (blk->host_timestamp_us != 0) ? blk->host_timestamp_us : esp_timer_get_time();
+        uint32_t sps_m = blk->sample_rate_sps ? blk->sample_rate_sps : ADSB_RATE_SPS;
+        uint64_t pairs_in_block = blk->bytes / 2;
+        s_ctx.slots[idx].block_start_sample = s_ctx.mlat_sample_counter;
+        s_ctx.slots[idx].block_time_us = tnow_m;
+        s_ctx.slots[idx].sample_rate_sps = sps_m;
+        s_ctx.mlat_sample_counter += pairs_in_block;
+        s_ctx.mlat_last_block_us = tnow_m;
         ring_give_filled(idx);
         break;
     }
@@ -528,7 +554,12 @@ static void adsb_decoder_task(void *arg)
         }
         iq_slot_t *slot = &s_ctx.slots[idx];
         if (s_ctx.decode_ok) {
-            adsb_decoder_bridge_process(slot->data, slot->bytes);
+            adsb_decoder_block_ctx_t bctx = {
+                .block_start_sample = slot->block_start_sample,
+                .block_time_us = slot->block_time_us,
+                .sample_rate_sps = slot->sample_rate_sps ? slot->sample_rate_sps : ADSB_RATE_SPS,
+            };
+            adsb_decoder_bridge_process_with_ctx(slot->data, slot->bytes, &bctx);
         }
         xQueueSend(s_ctx.free_q, &idx, 0);
         /* Accumulate decode busy time + processed samples so /api/debug can

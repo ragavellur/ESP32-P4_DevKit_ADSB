@@ -7,6 +7,7 @@
 #include "eth_netif.h"
 #include "rtl_pipeline.h"
 #include "beast_feeder.h"
+#include "mlat_client.h"
 
 static const char *TAG = "adsb_radar";
 
@@ -48,4 +49,7 @@ void app_main(void)
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "beast_feeder_start failed: %s", esp_err_to_name(ret));
     }
+
+    /* MLAT client (disabled by default) */
+    mlat_client_init();
 }

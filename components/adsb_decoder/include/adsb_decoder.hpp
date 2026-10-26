@@ -25,6 +25,8 @@ struct Frame {
   bool cpr_odd = false;
   bool has_cpr = false;
   uint16_t signal = 0;
+  /* Preamble start position in magnitudes buffer (sample index) */
+  uint32_t preamble_offset_samples = 0;
 };
 
 bool decode_global_cpr(const Frame& first, const Frame& second, bool use_odd,

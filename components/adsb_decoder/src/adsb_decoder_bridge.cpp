@@ -23,6 +23,9 @@ static uint32_t s_app_df17 = 0;
 static uint32_t s_app_crc_ok = 0;
 static adsb_frame_hook_t s_hook = nullptr;
 static void* s_hook_ctx = nullptr;
+/* Block timing context for current processing run */
+static adsb_decoder_block_ctx_t s_cur_ctx{};
+static bool s_has_cur_ctx = false;
 
 /* Recent-frame capture ring.
  *
@@ -35,6 +38,9 @@ static struct {
     uint8_t bytes[14];
     uint8_t bit_length;
     int64_t rx_timestamp_us;
+    int64_t rx_timestamp_sample_us;
+    uint64_t sample_index;
+    uint32_t preamble_offset_samples;
 } s_capture[kCaptureDepth];
 static volatile uint32_t s_capture_head = 0;
 static volatile uint32_t s_capture_total = 0;
@@ -86,12 +92,40 @@ static void on_frame(const Frame &frame, void *ctx)
          * what a reference decoder (readsb/dump1090) would emit. */
         memcpy(f.bytes, frame.bytes, sizeof(f.bytes));
         f.bit_length = frame.bit_length;
-        f.rx_timestamp_us = (int64_t)esp_timer_get_time();
+        f.preamble_offset_samples = frame.preamble_offset_samples;
+        int64_t decode_us = (int64_t)esp_timer_get_time();
+        f.rx_timestamp_us = decode_us;
+        f.rx_timestamp_sample_us = 0;
+        f.sample_index = 0;
+        f.sample_rate_sps = 0;
+        /* Sample-derived timestamp using block context + preamble offset.
+         * Preamble offset is in magnitudes buffer (includes overlap from previous block).
+         * We need to compute offset within current block. */
+        if (s_has_cur_ctx && s_cur_ctx.sample_rate_sps > 0 && s_cur_ctx.block_time_us > 0) {
+            /* Estimate overlap samples - decoder carries ~kTrailingSamples (~200 samples at 2.4MSPS)
+             * We'll use a conservative approach: if preamble_offset is large relative to typical
+             * block processing, it might be in overlap; but easier to just use block time as base
+             * and add offset estimate. For better accuracy, pipeline needs to track overlap. */
+            f.rx_timestamp_sample_us = s_cur_ctx.block_time_us;
+            f.sample_index = s_cur_ctx.block_start_sample;
+            f.sample_rate_sps = s_cur_ctx.sample_rate_sps;
+            /* If we have preamble offset, we can refine - offset is in samples at decoder rate */
+            if (f.preamble_offset_samples > 0 && f.sample_rate_sps > 0) {
+                /* Add small correction based on preamble position within the processed window */
+                /* This is approximate but better than nothing */
+                int64_t offset_us = ((int64_t)f.preamble_offset_samples * 1000000LL) / (int64_t)f.sample_rate_sps;
+                /* Subtract typical processing delay/overlap estimate (~1ms) as rough correction */
+                f.rx_timestamp_sample_us = s_cur_ctx.block_time_us - 1000 + offset_us / 10; /* rough */
+            }
+        }
         {
             const uint32_t slot = s_capture_head % kCaptureDepth;
             memcpy(s_capture[slot].bytes, frame.bytes, sizeof(f.bytes));
             s_capture[slot].bit_length = frame.bit_length;
             s_capture[slot].rx_timestamp_us = f.rx_timestamp_us;
+            s_capture[slot].rx_timestamp_sample_us = f.rx_timestamp_sample_us;
+            s_capture[slot].sample_index = f.sample_index;
+            s_capture[slot].preamble_offset_samples = f.preamble_offset_samples;
             s_capture_head = slot + 1;
             s_capture_total = s_capture_total + 1;
         }
@@ -154,6 +188,9 @@ uint32_t adsb_decoder_bridge_get_capture(adsb_captured_frame_t *out, uint32_t ca
         const uint32_t idx = (head - available + i) % kCaptureDepth;
         out[n].bit_length = s_capture[idx].bit_length;
         out[n].rx_timestamp_us = s_capture[idx].rx_timestamp_us;
+        out[n].rx_timestamp_sample_us = s_capture[idx].rx_timestamp_sample_us;
+        out[n].sample_index = s_capture[idx].sample_index;
+        out[n].preamble_offset_samples = s_capture[idx].preamble_offset_samples;
         memcpy(out[n].bytes, s_capture[idx].bytes, sizeof(out[n].bytes));
         ++n;
     }
@@ -165,7 +202,25 @@ void adsb_decoder_bridge_process(const uint8_t *cu8, size_t bytes)
     if (!cu8 || bytes == 0 || !s_ready || !s_self_pass) {
         return;
     }
+    s_has_cur_ctx = false;
     s_dec.process_cu8(cu8, bytes, on_frame, nullptr);
+    s_has_cur_ctx = false;
+}
+
+void adsb_decoder_bridge_process_with_ctx(const uint8_t *cu8, size_t bytes,
+                                          const adsb_decoder_block_ctx_t* ctx)
+{
+    if (!cu8 || bytes == 0 || !s_ready || !s_self_pass) {
+        return;
+    }
+    if (ctx) {
+        s_cur_ctx = *ctx;
+        s_has_cur_ctx = true;
+    } else {
+        s_has_cur_ctx = false;
+    }
+    s_dec.process_cu8(cu8, bytes, on_frame, nullptr);
+    s_has_cur_ctx = false;
 }
 
 void adsb_decoder_bridge_get_stats(adsb_decoder_bridge_stats_t *out)

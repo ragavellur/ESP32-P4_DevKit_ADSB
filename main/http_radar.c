@@ -15,6 +15,7 @@
 #include "adsb_decoder_bridge.h"
 #include "adsb_state.h"
 #include "beast_feeder.h"
+#include "mlat_client.h"
 #include "esp_rtl_sdr.h"
 #include "http_radar.h"
 #include "rtl_pipeline.h"
@@ -275,9 +276,12 @@ static esp_err_t h_frames(httpd_req_t *req)
         }
         hex[k] = '\0';
         off += snprintf(buf + off, JSON_BUF_CAP - (size_t)off,
-                        "%s{\"hex\":\"%s\",\"bits\":%u,\"t_us\":%lld}",
+                        "%s{\"hex\":\"%s\",\"bits\":%u,\"t_us\":%lld,\"t_sample_us\":%lld,\"sample_idx\":%llu,\"preamble_off\":%u}",
                         i ? "," : "", hex, (unsigned)frames[i].bit_length,
-                        (long long)frames[i].rx_timestamp_us);
+                        (long long)frames[i].rx_timestamp_us,
+                        (long long)frames[i].rx_timestamp_sample_us,
+                        (unsigned long long)frames[i].sample_index,
+                        (unsigned)frames[i].preamble_offset_samples);
         if (off >= (int)JSON_BUF_CAP) break;
     }
     if (off > 0 && off < (int)JSON_BUF_CAP) {
@@ -493,6 +497,8 @@ static esp_err_t h_settings_get(httpd_req_t *req)
  *
  * This avoids the classic bug where a substring search for "true"/"false"
  * spills past the field and matches a *different* key's value. */
+static void stripq(char *s){if(!s)return;size_t l=strlen(s);while(l>=2&&s[0]=='"'&&s[l-1]=='"'){memmove(s,s+1,l-1);s[l-2]=0;l=strlen(s);}while(l&&s[l-1]=='"'){s[--l]=0;}while(l&&s[0]=='"'){memmove(s,s+1,l);l=strlen(s);}}
+
 static bool json_get_value(const char *buf, const char *key, char *out, size_t out_sz)
 {
     if (!buf || !key || !out || out_sz == 0) return false;
@@ -510,13 +516,20 @@ static bool json_get_value(const char *buf, const char *key, char *out, size_t o
     while (*p == ' ' || *p == '\t') p++;
 
     size_t i = 0;
-    while (*p && *p != ',' && *p != '}' && *p != ']' && i + 1 < out_sz) {
-        out[i++] = *p++;
+    bool in_quotes = (*p == '"');
+    if (in_quotes) p++;
+    while (*p && i + 1 < out_sz) {
+        if (in_quotes) {
+            if (*p == '\\' && *(p+1)) { p++; out[i++] = *p++; continue; }
+            if (*p == '"') { p++; break; }
+            out[i++] = *p++;
+        } else {
+            if (*p == ',' || *p == '}' || *p == ']' || *p == ' ' || *p == '\t') break;
+            out[i++] = *p++;
+        }
     }
-    if (i == 0) return false;
-    while (i > 0 && (out[i - 1] == ' ' || out[i - 1] == '\t')) i--;
     out[i] = '\0';
-    return i > 0;
+    return true;
 }
 
 static esp_err_t h_settings_post(httpd_req_t *req)
@@ -847,6 +860,90 @@ static esp_err_t h_settings_reset(httpd_req_t *req)
     return httpd_resp_send(req, resp, strlen(resp));
 }
 
+static esp_err_t h_mlat_get(httpd_req_t *req)
+{
+    mlat_client_config_t cfg;
+    mlat_client_stats_t st;
+    mlat_client_get_config(&cfg);
+    mlat_client_get_stats(&st);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    char buf[1024];
+    snprintf(buf, sizeof(buf),
+             "{\"enabled\":%s,\"host\":\"%s\",\"port\":%u,\"uuid\":\"%s\",\"station_name\":\"%s\","
+             "\"lat\":%.6f,\"lon\":%.6f,\"alt_m\":%.1f,\"privacy\":%s,\"return_results\":%s,"
+             "\"use_udp\":%s,\"use_zlib\":%s,"
+             "\"stats\":{\"frames_observed\":%u,\"frames_eligible\":%u,\"frames_submitted\":%u,"
+             "\"frames_dropped_queue\":%u,\"frames_invalid_ts\":%u,\"frames_ts_preamble\":%u,\"frames_ts_fallback\":%u,"
+             "\"tcp_sent\":%u,\"udp_sent\":%u,"
+             "\"reconnects\":%u,\"protocol_errors\":%u,\"server_results\":%u,\"connected\":%s,"
+             "\"queue_depth\":%u,\"queue_high_water\":%u}}",
+             cfg.enabled ? "true" : "false", cfg.host, (unsigned)cfg.port, cfg.uuid, cfg.station_name,
+             cfg.lat, cfg.lon, cfg.alt_m,
+             cfg.privacy ? "true" : "false", cfg.return_results ? "true" : "false",
+             cfg.use_udp ? "true" : "false", cfg.use_zlib ? "true" : "false",
+             (unsigned)st.frames_observed, (unsigned)st.frames_eligible, (unsigned)st.frames_submitted,
+             (unsigned)st.frames_dropped_queue, (unsigned)st.frames_invalid_ts, (unsigned)st.frames_ts_preamble,
+             (unsigned)st.frames_ts_fallback, (unsigned)st.tcp_sent,
+             (unsigned)st.udp_sent, (unsigned)st.reconnects, (unsigned)st.protocol_errors,
+             (unsigned)st.server_results, st.connected ? "true" : "false",
+             (unsigned)st.queue_depth, (unsigned)st.queue_high_water);
+    httpd_resp_sendstr(req, buf);
+    return ESP_OK;
+}
+
+static esp_err_t h_mlat_post(httpd_req_t *req)
+{
+    size_t len = req->content_len;
+    if (len == 0 || len > 1024) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad");
+        return ESP_FAIL;
+    }
+    char *buf = malloc(len + 1);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "oom");
+        return ESP_FAIL;
+    }
+    int ret = httpd_req_recv(req, buf, len);
+    if (ret <= 0) {
+        free(buf);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty");
+        return ESP_FAIL;
+    }
+    buf[ret] = '\0';
+
+    mlat_client_config_t cfg;
+    mlat_client_get_config(&cfg);
+    char val[256];
+    if (json_get_value(buf, "enabled", val, sizeof(val))) cfg.enabled = (strcmp(val, "true") == 0);
+    if (json_get_value(buf, "host", val, sizeof(val))) { stripq(val); snprintf(cfg.host, sizeof(cfg.host), "%.127s", val); }
+    if (json_get_value(buf, "port", val, sizeof(val))) { stripq(val); cfg.port = (uint16_t)atoi(val); }
+    if (json_get_value(buf, "uuid", val, sizeof(val))) { stripq(val); snprintf(cfg.uuid, sizeof(cfg.uuid), "%.39s", val); }
+    if (json_get_value(buf, "station_name", val, sizeof(val))) { stripq(val); snprintf(cfg.station_name, sizeof(cfg.station_name), "%.31s", val); }
+    if (json_get_value(buf, "lat", val, sizeof(val))) cfg.lat = atof(val);
+    if (json_get_value(buf, "lon", val, sizeof(val))) cfg.lon = atof(val);
+    if (json_get_value(buf, "alt_m", val, sizeof(val))) cfg.alt_m = atof(val);
+    if (json_get_value(buf, "privacy", val, sizeof(val))) cfg.privacy = (strcmp(val, "true") == 0);
+    if (json_get_value(buf, "return_results", val, sizeof(val))) cfg.return_results = (strcmp(val, "true") == 0);
+    if (json_get_value(buf, "use_udp", val, sizeof(val))) cfg.use_udp = (strcmp(val, "true") == 0);
+    if (json_get_value(buf, "use_zlib", val, sizeof(val))) cfg.use_zlib = (strcmp(val, "true") == 0);
+    free(buf);
+
+    esp_err_t err = mlat_client_set_config(&cfg);
+    if (err != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid");
+        return ESP_FAIL;
+    }
+    if (cfg.enabled && cfg.host[0]) {
+        mlat_client_stop();
+        mlat_client_start();
+    } else {
+        mlat_client_stop();
+    }
+    return h_mlat_get(req);
+}
+
+
 esp_err_t http_radar_start(void)
 {
     nvs_load_receiver();
@@ -914,6 +1011,14 @@ esp_err_t http_radar_start(void)
         .uri = "/api/feeder", .method = HTTP_POST,
         .handler = h_feeder_post, .user_ctx = NULL
     };
+    const httpd_uri_t r_mlat_get = {
+        .uri = "/api/mlat", .method = HTTP_GET,
+        .handler = h_mlat_get, .user_ctx = NULL
+    };
+    const httpd_uri_t r_mlat_post = {
+        .uri = "/api/mlat", .method = HTTP_POST,
+        .handler = h_mlat_post, .user_ctx = NULL
+    };
     if (httpd_register_uri_handler(server, &r_radar)  != ESP_OK ||
         httpd_register_uri_handler(server, &r_root)   != ESP_OK ||
         httpd_register_uri_handler(server, &r_feed)   != ESP_OK ||
@@ -926,7 +1031,9 @@ esp_err_t http_radar_start(void)
         httpd_register_uri_handler(server, &r_settings_post) != ESP_OK ||
         httpd_register_uri_handler(server, &r_settings_reset) != ESP_OK ||
         httpd_register_uri_handler(server, &r_feeder_get) != ESP_OK ||
-        httpd_register_uri_handler(server, &r_feeder_post) != ESP_OK) {
+        httpd_register_uri_handler(server, &r_feeder_post) != ESP_OK ||
+        httpd_register_uri_handler(server, &r_mlat_get) != ESP_OK ||
+        httpd_register_uri_handler(server, &r_mlat_post) != ESP_OK) {
         ESP_LOGE(TAG, "uri registration failed");
         httpd_stop(server);
         return ESP_FAIL;
