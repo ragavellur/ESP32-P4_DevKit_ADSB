@@ -7,8 +7,6 @@
 /* Validation gates                                                    */
 /* ------------------------------------------------------------------ */
 
-/* Call signs may contain A-Z 0-9 and spaces; require at least one visible
- * char and no control characters (dump1090-style acceptance). */
 static bool callsign_ok(const char* s)
 {
     if (!s) return false;
@@ -49,7 +47,11 @@ typedef struct {
     uint32_t cpr_lon[2];
     uint32_t cpr_ms[2];
     bool     cpr_have[2];
-    bool     last_was_surface;
+    bool     cpr_surface[2];
+    double   last_pos_lat;
+    double   last_pos_lon;
+    uint32_t last_pos_ms;
+    bool     has_last_pos;
 } adsb_track_t;
 
 static adsb_track_t s_tracks[ADS_STATE_MAX_TRACKS];
@@ -58,9 +60,19 @@ static double s_rx_lat = 0.0;
 static double s_rx_lon = 0.0;
 static bool s_rx_loc_set = false;
 
+/* Diagnostics */
+static adsb_state_diag_t s_diag = {0};
+
 void adsb_state_init(void)
 {
     memset(s_tracks, 0, sizeof(s_tracks));
+    memset(&s_diag, 0, sizeof(s_diag));
+}
+
+void adsb_state_get_diag(adsb_state_diag_t* out)
+{
+    if (!out) return;
+    *out = s_diag;
 }
 
 void adsb_state_set_cpr_pair(adsb_cpr_pair_t pair)
@@ -70,9 +82,11 @@ void adsb_state_set_cpr_pair(adsb_cpr_pair_t pair)
 
 void adsb_state_set_location(double lat, double lon)
 {
-    s_rx_lat = lat;
-    s_rx_lon = lon;
-    s_rx_loc_set = true;
+    if (lat >= -90.0 && lat <= 90.0 && lon >= -180.0 && lon <= 180.0) {
+        s_rx_lat = lat;
+        s_rx_lon = lon;
+        s_rx_loc_set = true;
+    }
 }
 
 static adsb_track_t* find_or_add(uint32_t icao)
@@ -88,7 +102,6 @@ static adsb_track_t* find_or_add(uint32_t icao)
         }
     }
     if (!free_slot) {
-        /* Table full: evict the track longest-idle (AT LEAST track[0]). */
         free_slot = &s_tracks[0];
         uint32_t oldest_ms = s_tracks[0].last_seen_ms;
         for (int i = 1; i < ADS_STATE_MAX_TRACKS; ++i) {
@@ -108,7 +121,6 @@ static adsb_track_t* find_or_add(uint32_t icao)
     return free_slot;
 }
 
-/* Haversine distance in nautical miles */
 static double haversine_nm(double lat1, double lon1, double lat2, double lon2)
 {
     const double R = 6371.0;
@@ -117,19 +129,64 @@ static double haversine_nm(double lat1, double lon1, double lat2, double lon2)
     double a = sin(dlat / 2.0) * sin(dlat / 2.0) +
                cos(lat1 * M_PI / 180.0) * cos(lat2 * M_PI / 180.0) *
                sin(dlon / 2.0) * sin(dlon / 2.0);
+    if (a < 0.0) a = 0.0;
+    if (a > 1.0) a = 1.0;
     double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
     double km = R * c;
     return km * 0.539957;
 }
 
-/* Local CPR decode (airborne) - simplified approach using receiver or last position as reference */
-static bool cpr_local_airborne(uint32_t icao, uint32_t lat_cpr, uint32_t lon_cpr, bool odd,
-                               double ref_lat, double ref_lon, double* lat_out, double* lon_out)
+static int cpr_nl(double lat)
 {
-    (void)icao;
-    /* Use global CPR logic but with reference - for now, try to use decode_global_cpr style
-     * but we need both; alternatively use the known position if available */
-    return false;
+    if (lat >= 87.0 || lat <= -87.0) return 1;
+    return (int)floor(2.0 * M_PI / acos(1.0 - (1.0 - cos(M_PI / 30.0)) /
+                                                    (cos(lat * M_PI / 180.0) * cos(lat * M_PI / 180.0))));
+}
+
+static bool cpr_mod(int a, int b, int* r)
+{
+    if (b == 0) return false;
+    *r = ((a % b) + b) % b;
+    return true;
+}
+
+/* Local CPR for airborne using reference position */
+static bool cpr_local_airborne_try(uint32_t lat_cpr, uint32_t lon_cpr, bool odd,
+                                   double ref_lat, double ref_lon, double* out_lat, double* out_lon)
+{
+    if (ref_lat < -90.0 || ref_lat > 90.0 || ref_lon < -180.0 || ref_lon > 180.0) return false;
+    if (lat_cpr >= 131072 || lon_cpr >= 131072) return false;
+    const double yz = lat_cpr / 131072.0;
+    const double xz = lon_cpr / 131072.0;
+    const double air_dlat = odd ? (360.0 / 59.0) : (360.0 / 60.0);
+    const int nl_ref = cpr_nl(ref_lat);
+    if (nl_ref < 1) return false;
+    const int ni = nl_ref - (odd ? 1 : 0);
+    if (ni < 1) return false;
+    /* Find lat zone */
+    double lat = odd ? air_dlat : (air_dlat / 1.0); /* rough */
+    /* Use standard local CPR approximation */
+    double dlat = odd ? (360.0 / 59.0) : (360.0 / 60.0);
+    double lat0 = floor(ref_lat / dlat + 0.5) * dlat;
+    /* better: compute base */
+    int j = (int)floor(ref_lat / dlat) + (int)floor(yz + 0.5);
+    lat0 = dlat * (j + yz);
+    if (lat0 > 90.0) lat0 -= 180.0;
+    if (lat0 < -90.0) lat0 += 180.0;
+    /* normalize to same hemisphere as reasonable */
+    /* compute longitude */
+    double dlon = 360.0 / ni;
+    int m = (int)floor(ref_lon / dlon) + (int)floor(xz + 0.5);
+    double lon = dlon * (m + xz);
+    if (lon > 180.0) lon -= 360.0;
+    if (lon < -180.0) lon += 360.0;
+    if (lat0 < -90.0 || lat0 > 90.0) return false;
+    /* Check distance from reference */
+    double d = haversine_nm(ref_lat, ref_lon, lat0, lon);
+    if (d > 180.0) return false;
+    *out_lat = lat0;
+    *out_lon = lon;
+    return true;
 }
 
 /* Global CPR decode once both parities are fresh (pairing window 10 s). */
@@ -137,33 +194,183 @@ static void cpr_try_pair(adsb_track_t* t, uint32_t now_ms)
 {
     if (!s_pair) return;
     if (!t->cpr_have[0] || !t->cpr_have[1]) return;
-    if (now_ms - t->cpr_ms[0] > ADS_STATE_CPR_MAX_AGE_MS ||
-        now_ms - t->cpr_ms[1] > ADS_STATE_CPR_MAX_AGE_MS) {
+    if (t->cpr_surface[0] != t->cpr_surface[1]) {
+        s_diag.cpr_reject_mismatch++;
         return;
     }
-    double lat, lon;
-    if (s_pair(t->icao, t->cpr_lat[0], t->cpr_lon[0],
-               t->cpr_lat[1], t->cpr_lon[1], &lat, &lon)) {
-        /* Validate position plausibility */
-        if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+    bool is_surface = t->cpr_surface[0] || t->cpr_surface[1];
+    if (now_ms - t->cpr_ms[0] > ADS_STATE_CPR_MAX_AGE_MS ||
+        now_ms - t->cpr_ms[1] > ADS_STATE_CPR_MAX_AGE_MS) {
+        s_diag.cpr_stale++;
+        return;
+    }
+    if (is_surface) {
+        /* Surface uses different NL; global CPR formula is similar but we must be careful.
+         * Try global pair first but validate surface constraints. */
+        double lat, lon;
+        s_diag.cpr_global_attempt++;
+        if (s_pair(t->icao, t->cpr_lat[0], t->cpr_lon[0],
+                   t->cpr_lat[1], t->cpr_lon[1], &lat, &lon)) {
+            if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+                s_diag.cpr_global_fail++;
+                s_diag.cpr_invalid++;
+                return;
+            }
+            if (s_rx_loc_set) {
+                double d = haversine_nm(s_rx_lat, s_rx_lon, lat, lon);
+                /* Surface positions are usually close to ground/airports but still can be far; be reasonable */
+                if (d > 250.0) {
+                    s_diag.cpr_invalid++;
+                    return;
+                }
+            }
+            if (t->has_position) {
+                double d2 = haversine_nm(t->lat, t->lon, lat, lon);
+                /* Surface movement limits roughly */
+                if (d2 > 50.0) {
+                    s_diag.cpr_invalid++;
+                    return;
+                }
+            }
+            t->lat = lat;
+            t->lon = lon;
+            t->has_position = true;
+            t->has_last_pos = true;
+            t->last_pos_lat = lat;
+            t->last_pos_lon = lon;
+            t->last_pos_ms = now_ms;
+            s_diag.cpr_global_success++;
+            s_diag.tracks_pos_global++;
+            return;
+        } else {
+            s_diag.cpr_global_fail++;
             return;
         }
-        /* If we have previous position and receiver location, check distance */
-        if (t->has_position) {
-            double d = haversine_nm(t->lat, t->lon, lat, lon);
-            if (d > 500.0) { /* unreasonable jump */
-                /* don't reject immediately, but be conservative */
-            }
-        } else if (s_rx_loc_set) {
+    }
+    double lat, lon;
+    s_diag.cpr_global_attempt++;
+    if (s_pair(t->icao, t->cpr_lat[0], t->cpr_lon[0],
+               t->cpr_lat[1], t->cpr_lon[1], &lat, &lon)) {
+        if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+            s_diag.cpr_global_fail++;
+            s_diag.cpr_invalid++;
+            return;
+        }
+        if (s_rx_loc_set) {
             double d = haversine_nm(s_rx_lat, s_rx_lon, lat, lon);
-            if (d > 180.0 * 2.0) { /* allow some margin */
-                /* might be valid far away */
+            if (d > 360.0) {
+                /* allow but be cautious; still possible far away */
+            }
+        }
+        if (t->has_position && t->gs >= 0) {
+            double d2 = haversine_nm(t->lat, t->lon, lat, lon);
+            double dt_s = (now_ms > t->last_seen_ms) ? ((now_ms - t->last_seen_ms) / 1000.0) : 1.0;
+            if (dt_s < 0.001) dt_s = 0.001;
+            double max_nm = (t->gs / 3600.0) * dt_s * 2.5 + 5.0;
+            if (d2 > max_nm && max_nm < 500.0) {
+                s_diag.cpr_invalid++;
+                return;
             }
         }
         t->lat = lat;
         t->lon = lon;
         t->has_position = true;
+        t->has_last_pos = true;
+        t->last_pos_lat = lat;
+        t->last_pos_lon = lon;
+        t->last_pos_ms = now_ms;
+        s_diag.cpr_global_success++;
+        s_diag.tracks_pos_global++;
+        return;
+    } else {
+        s_diag.cpr_global_fail++;
     }
+}
+
+static void cpr_try_local(adsb_track_t* t, const adsb_frame_t* f, uint32_t now_ms)
+{
+    if (!f->has_cpr) return;
+    if (t->has_position) return; /* prefer global or keep existing */
+    bool is_surface = f->cpr_surface;
+    s_diag.cpr_local_attempt++;
+    if (is_surface) {
+        /* Surface local CPR is possible but more ambiguous; require good reference */
+        double ref_lat = 0, ref_lon = 0;
+        bool have_ref = false;
+        if (t->has_last_pos && (now_ms - t->last_pos_ms < 120000)) {
+            ref_lat = t->last_pos_lat; ref_lon = t->last_pos_lon; have_ref = true;
+        } else if (s_rx_loc_set) {
+            ref_lat = s_rx_lat; ref_lon = s_rx_lon; have_ref = true;
+        }
+        if (!have_ref) {
+            s_diag.cpr_missing_ref++;
+            return;
+        }
+        /* Use similar method but stricter */
+        double lat, lon;
+        if (cpr_local_airborne_try(f->cpr_latitude, f->cpr_longitude, f->cpr_odd, ref_lat, ref_lon, &lat, &lon)) {
+            if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+                s_diag.cpr_local_fail++;
+                s_diag.cpr_invalid++;
+                return;
+            }
+            double dref = haversine_nm(ref_lat, ref_lon, lat, lon);
+            if (dref > 50.0) { /* surface positions should be closer */
+                s_diag.cpr_local_fail++;
+                s_diag.cpr_invalid++;
+                return;
+            }
+            t->lat = lat; t->lon = lon; t->has_position = true;
+            t->has_last_pos = true; t->last_pos_lat = lat; t->last_pos_lon = lon; t->last_pos_ms = now_ms;
+            s_diag.cpr_local_success++;
+            s_diag.tracks_pos_local++;
+            return;
+        }
+        s_diag.cpr_local_fail++;
+        return;
+    }
+    /* Airborne local CPR */
+    double ref_lat = 0, ref_lon = 0;
+    bool have_ref = false;
+    if (t->has_last_pos && (now_ms - t->last_pos_ms < 300000)) {
+        ref_lat = t->last_pos_lat; ref_lon = t->last_pos_lon; have_ref = true;
+    } else if (s_rx_loc_set) {
+        ref_lat = s_rx_lat; ref_lon = s_rx_lon; have_ref = true;
+    }
+    if (!have_ref) {
+        s_diag.cpr_missing_ref++;
+        return;
+    }
+    double lat, lon;
+    if (cpr_local_airborne_try(f->cpr_latitude, f->cpr_longitude, f->cpr_odd, ref_lat, ref_lon, &lat, &lon)) {
+        if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+            s_diag.cpr_local_fail++;
+            s_diag.cpr_invalid++;
+            return;
+        }
+        double dref = haversine_nm(ref_lat, ref_lon, lat, lon);
+        if (dref > 180.0) {
+            s_diag.cpr_local_fail++;
+            s_diag.cpr_ref_outside++;
+            return;
+        }
+        if (t->has_position && t->gs >= 0) {
+            double d2 = haversine_nm(t->lat, t->lon, lat, lon);
+            double dt_s = (now_ms - t->last_seen_ms) / 1000.0;
+            if (dt_s < 0.001) dt_s = 0.001;
+            double max_nm = (t->gs / 3600.0) * dt_s * 3.0 + 10.0;
+            if (d2 > max_nm && max_nm < 1000.0) {
+                s_diag.cpr_invalid++;
+                return;
+            }
+        }
+        t->lat = lat; t->lon = lon; t->has_position = true;
+        t->has_last_pos = true; t->last_pos_lat = lat; t->last_pos_lon = lon; t->last_pos_ms = now_ms;
+        s_diag.cpr_local_success++;
+        s_diag.tracks_pos_local++;
+        return;
+    }
+    s_diag.cpr_local_fail++;
 }
 
 void adsb_state_update(const adsb_frame_t* f, uint32_t now_ms)
@@ -172,14 +379,20 @@ void adsb_state_update(const adsb_frame_t* f, uint32_t now_ms)
     adsb_track_t* t = find_or_add(f->icao);
 
     if (f->has_callsign && callsign_ok(f->callsign)) {
-        /* Keep an already-good callsign; accept a NEW one only if it
-         * differs (rejects "  " pad garbage from a superseded frame). */
         if (t->flight[0] == '\0' || strncmp(t->flight, f->callsign, 8) != 0) {
             memcpy(t->flight, f->callsign, 8);
             t->flight[8] = '\0';
         }
     }
-    if (f->has_altitude && alt_ok(f->altitude_ft)) t->alt_baro = f->altitude_ft;
+    if (f->has_altitude && alt_ok(f->altitude_ft)) {
+        /* For TC5-8 surface we must not store altitude as baro from position; but altitude_ft comes from parsed frame
+         * - caller/state must respect cpr_surface; we still store if valid but caller should be careful */
+        if (!(f->cpr_surface && f->has_cpr)) {
+            t->alt_baro = f->altitude_ft;
+        } else {
+            /* surface position messages don't carry barometric altitude in same way - skip */
+        }
+    }
     if (f->has_speed && gs_ok(f->speed_kts)) t->gs = f->speed_kts;
     if (f->has_heading && hdg_ok(f->heading_deg)) t->heading = f->heading_deg;
     if (f->has_vertical_rate && vr_ok(f->vertical_rate_fpm)) {
@@ -189,12 +402,21 @@ void adsb_state_update(const adsb_frame_t* f, uint32_t now_ms)
 
     if (f->has_cpr) {
         const int parity = f->cpr_odd ? 1 : 0;
+        /* Never mix surface/airborne parity types */
+        if (t->cpr_have[parity] && t->cpr_surface[parity] != f->cpr_surface) {
+            /* clear conflicting parity */
+            t->cpr_have[parity] = false;
+        }
         t->cpr_lat[parity] = f->cpr_latitude;
         t->cpr_lon[parity] = f->cpr_longitude;
         t->cpr_ms[parity] = now_ms;
         t->cpr_have[parity] = true;
-        t->last_was_surface = f->cpr_surface;
+        t->cpr_surface[parity] = f->cpr_surface;
+        s_diag.cpr_even_odd[f->cpr_odd ? 1 : 0]++;
         cpr_try_pair(t, now_ms);
+        if (!t->has_position) {
+            cpr_try_local(t, f, now_ms);
+        }
     }
 
     t->last_seen_ms = now_ms;

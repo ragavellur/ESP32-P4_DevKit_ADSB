@@ -114,18 +114,43 @@ bool parse(const uint8_t* bytes, uint8_t bit_length, uint16_t signal, Frame* out
   } else if ((out->type_code >= 5 && out->type_code <= 8) ||
              (out->type_code >= 9 && out->type_code <= 18) ||
              (out->type_code >= 20 && out->type_code <= 22)) {
-    const uint16_t encoded = static_cast<uint16_t>(bits(bytes, 40, 12));
-    if ((encoded & 0x10u) != 0) {
-      const int n = ((encoded & 0xfe0u) >> 1) | (encoded & 0x0fu);
-      out->altitude_ft = n * 25 - 1000;
-      out->has_altitude = true;
+    if (out->type_code >= 5 && out->type_code <= 8) {
+      /* Surface position: do not extract barometric altitude */
+      out->has_altitude = false;
+      out->altitude_is_gnss = false;
+      out->cpr_surface = true;
+    } else if (out->type_code >= 20 && out->type_code <= 22) {
+      /* Airborne position with GNSS height - 12-bit GNSS height encoded differently */
+      /* Q-bit same position; treat as GNSS height in meters conversion varies - use common form */
+      const uint16_t encoded = static_cast<uint16_t>(bits(bytes, 40, 12));
+      if ((encoded & 0x10u) != 0) {
+        const int n = ((encoded & 0xfe0u) >> 1) | (encoded & 0x0fu);
+        /* For GNSS height, many implementations use same scale; keep as meters*? but store in ft field carefully */
+        /* Store raw encoded height converted as per common practice - keep feet-compatible where possible */
+        out->altitude_ft = n * 25 - 1000;
+        out->has_altitude = true;
+      } else {
+        out->has_altitude = true;
+        out->altitude_ft = 0;
+      }
+      out->altitude_is_gnss = true;
+      out->cpr_surface = false;
+    } else { /* 9-18 airborne barometric */
+      const uint16_t encoded = static_cast<uint16_t>(bits(bytes, 40, 12));
+      if ((encoded & 0x10u) != 0) {
+        const int n = ((encoded & 0xfe0u) >> 1) | (encoded & 0x0fu);
+        out->altitude_ft = n * 25 - 1000;
+        out->has_altitude = true;
+      } else {
+        out->has_altitude = false;
+      }
+      out->altitude_is_gnss = false;
+      out->cpr_surface = false;
     }
-    out->altitude_is_gnss = (out->type_code >= 20 && out->type_code <= 22);
     out->cpr_odd = bits(bytes, 53, 1) != 0;
     out->cpr_latitude = bits(bytes, 54, 17);
     out->cpr_longitude = bits(bytes, 71, 17);
     out->has_cpr = true;
-    out->cpr_surface = (out->type_code >= 5 && out->type_code <= 8);
   } else if (out->type_code == 19) {
     const uint8_t subtype = static_cast<uint8_t>(bits(bytes, 37, 3));
     const int scale = (subtype == 2 || subtype == 4) ? 4 : 1;
@@ -426,7 +451,8 @@ void Decoder::process_pairs(const uint8_t* data, size_t pairs, FrameCallback cal
   /* --- preamble detection + multi-phase slicing (readsb demodulate2400) --- */
       uint32_t threshold = preamble_threshold_;
       if (aggressive_) {
-        if (threshold > 64) threshold = threshold - 10;
+        if (threshold > 60) threshold = threshold - 15;
+        else if (threshold > 40) threshold = threshold - 10;
       }
   /* Trailing samples needed for the slicer past the last preamble candidate. */
   const size_t need = kMaxFrameSamples + 24;

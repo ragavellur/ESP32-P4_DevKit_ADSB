@@ -375,7 +375,7 @@ static void bridge_to_state(const adsb_frame_info_t *f, uint32_t now_ms)
     adsb_frame_t sf;
     memset(&sf, 0, sizeof(sf));
     sf.icao = f->icao;
-    sf.icao_is_icao = true;
+    sf.icao_is_icao = f->icao_is_icao;
     sf.df = f->df;
     sf.cf = f->cf;
     sf.type_code = f->type_code;
@@ -1029,6 +1029,13 @@ esp_err_t rtl_pipeline_apply_settings(void)
     ESP_LOGI(PIPELINE_TAG, "DC filter: %s", s_settings.dc_filter ? "ON" : "OFF");
     /* Apply aggressive mode */
     adsb_decoder_bridge_set_aggressive(s_settings.aggressive);
+    {
+        uint32_t eff_th = ADSB_PREAMBLE_THRESHOLD;
+        if (s_settings.aggressive) {
+            eff_th = eff_th > 70 ? eff_th - 15 : (eff_th > 55 ? eff_th - 10 : eff_th);
+        }
+        adsb_decoder_bridge_set_preamble_threshold(eff_th);
+    }
     ESP_LOGI(PIPELINE_TAG, "Aggressive mode: %s", s_settings.aggressive ? "ON" : "OFF");
     /* Apply CRC fix */
     adsb_decoder_bridge_set_crc_fix(s_settings.crc_fix);
@@ -1041,8 +1048,12 @@ esp_err_t rtl_pipeline_apply_settings(void)
         last_applied_sample_rate = s_settings.sample_rate_sps;
         /* Update decoder sample rate */
 adsb_decoder_bridge_set_sample_rate(s_settings.sample_rate_sps);
-    adsb_decoder_bridge_set_preamble_threshold(s_settings.aggressive ? (ADSB_PREAMBLE_THRESHOLD > 70 ? ADSB_PREAMBLE_THRESHOLD - 15 : ADSB_PREAMBLE_THRESHOLD)
-                                                                         : ADSB_PREAMBLE_THRESHOLD);
+    /* Apply effective threshold; keep single source of truth aligned with decoder */
+    uint32_t eff_th = ADSB_PREAMBLE_THRESHOLD;
+    if (s_settings.aggressive) {
+        eff_th = eff_th > 70 ? eff_th - 15 : (eff_th > 55 ? eff_th - 10 : eff_th);
+    }
+    adsb_decoder_bridge_set_preamble_threshold(eff_th);
         /* Signal pipeline restart needed */
         return ESP_ERR_INVALID_STATE; // Special code to indicate restart needed
     }

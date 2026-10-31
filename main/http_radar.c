@@ -180,6 +180,8 @@ static esp_err_t h_debug(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_FAIL;
     }
+    adsb_state_diag_t diag = {0};
+    adsb_state_get_diag(&diag);
     snprintf(buf, JSON_BUF_CAP,
         "{\"now\":%llu,\"phase\":\"%s\",\"device_present\":%s,\"decode_ok\":%s,"
         "\"uptime_ms\":%llu,"
@@ -198,7 +200,8 @@ static esp_err_t h_debug(httpd_req_t *req)
         "\"efficiency\":%.3f,\"advice\":\"%s\"},"
         "\"pipe\":{\"overruns\":%lu,\"driver_drops\":%lu,\"ring_drops\":%lu,\"ring_free\":%lu},"
         "\"dsp\":{\"busy_pct\":%.1f,\"samples_per_s\":%.0f,\"required_sps\":%lu},"
-        "\"decoder\":{\"df11\":%lu,\"df17\":%lu,\"df18\":%lu}}",
+        "\"decoder\":{\"df11\":%lu,\"df17\":%lu,\"df18\":%lu},"
+        "\"cpr\":{\"even_odd_even\":%lu,\"even_odd_odd\":%lu,\"global_attempt\":%lu,\"global_success\":%lu,\"global_fail\":%lu,\"local_attempt\":%lu,\"local_success\":%lu,\"local_fail\":%lu,\"missing_ref\":%lu,\"ref_outside\":%lu,\"stale\":%lu,\"invalid\":%lu,\"mismatch\":%lu,\"tracks_pos_global\":%lu,\"tracks_pos_local\":%lu}}",
         (unsigned long long)(esp_timer_get_time() / 1000),
         st.phase == RTL_PIPELINE_STREAMING ? "streaming" :
         st.phase == RTL_PIPELINE_OPTAINING ? "obtaining" :
@@ -227,7 +230,13 @@ static esp_err_t h_debug(httpd_req_t *req)
         (unsigned long)st.ring_free_slots,
         (double)d.dsp_busy_pct, (double)d.dsp_samples_per_s,
         (unsigned long)d.programmed_sps,
-        (unsigned long)d.df11_total, (unsigned long)d.df17_total, (unsigned long)d.df18_total);
+        (unsigned long)d.df11_total, (unsigned long)d.df17_total, (unsigned long)d.df18_total,
+        (unsigned long)diag.cpr_even_odd[0], (unsigned long)diag.cpr_even_odd[1],
+        (unsigned long)diag.cpr_global_attempt, (unsigned long)diag.cpr_global_success, (unsigned long)diag.cpr_global_fail,
+        (unsigned long)diag.cpr_local_attempt, (unsigned long)diag.cpr_local_success, (unsigned long)diag.cpr_local_fail,
+        (unsigned long)diag.cpr_missing_ref, (unsigned long)diag.cpr_ref_outside, (unsigned long)diag.cpr_stale,
+        (unsigned long)diag.cpr_invalid, (unsigned long)diag.cpr_reject_mismatch,
+        (unsigned long)diag.tracks_pos_global, (unsigned long)diag.tracks_pos_local);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");

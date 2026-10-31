@@ -82,6 +82,25 @@ void adsb_state_set_cpr_pair(adsb_cpr_pair_t pair);
 /* Set receiver location for local CPR decoding. */
 void adsb_state_set_location(double lat, double lon);
 
+typedef struct {
+    uint32_t cpr_even_odd[2];
+    uint32_t cpr_global_attempt;
+    uint32_t cpr_global_success;
+    uint32_t cpr_global_fail;
+    uint32_t cpr_local_attempt;
+    uint32_t cpr_local_success;
+    uint32_t cpr_local_fail;
+    uint32_t cpr_missing_ref;
+    uint32_t cpr_ref_outside;
+    uint32_t cpr_stale;
+    uint32_t cpr_invalid;
+    uint32_t cpr_reject_mismatch;
+    uint32_t tracks_pos_global;
+    uint32_t tracks_pos_local;
+} adsb_state_diag_t;
+
+void adsb_state_get_diag(adsb_state_diag_t* out);
+
 /* Feed one CRC-valid decoded frame. now_ms = monotonic ms tick. */
 void adsb_state_update(const adsb_frame_t* f, uint32_t now_ms);
 
