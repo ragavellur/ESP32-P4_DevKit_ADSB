@@ -31,6 +31,7 @@ static bool vr_ok(int v)  { return v >= -30000 && v <= 30000; }
 
 typedef struct {
     uint32_t icao;
+    bool     icao_is_icao;
     uint32_t last_seen_ms;
     uint32_t revision;
     int      signal;
@@ -89,14 +90,17 @@ void adsb_state_set_location(double lat, double lon)
     }
 }
 
-static adsb_track_t* find_or_add(uint32_t icao)
+static adsb_track_t* find_or_add_by_addr(uint32_t icao, bool icao_is_icao)
 {
+    for (int i = 0; i < ADS_STATE_MAX_TRACKS; ++i) {
+        adsb_track_t* t = &s_tracks[i];
+        if (t->icao == icao && t->icao != 0 && t->icao_is_icao == icao_is_icao) {
+            return t;
+        }
+    }
     adsb_track_t* free_slot = 0;
     for (int i = 0; i < ADS_STATE_MAX_TRACKS; ++i) {
         adsb_track_t* t = &s_tracks[i];
-        if (t->icao == icao) {
-            return t;
-        }
         if (t->icao == 0 && !free_slot) {
             free_slot = t;
         }
@@ -113,6 +117,7 @@ static adsb_track_t* find_or_add(uint32_t icao)
     }
     memset(free_slot, 0, sizeof(*free_slot));
     free_slot->icao = icao;
+    free_slot->icao_is_icao = icao_is_icao;
     free_slot->alt_baro = -1;
     free_slot->gs = -1;
     free_slot->heading = -1;
@@ -143,49 +148,105 @@ static int cpr_nl(double lat)
                                                     (cos(lat * M_PI / 180.0) * cos(lat * M_PI / 180.0))));
 }
 
-static bool cpr_mod(int a, int b, int* r)
-{
-    if (b == 0) return false;
-    *r = ((a % b) + b) % b;
-    return true;
-}
-
 /* Local CPR for airborne using reference position */
 static bool cpr_local_airborne_try(uint32_t lat_cpr, uint32_t lon_cpr, bool odd,
                                    double ref_lat, double ref_lon, double* out_lat, double* out_lon)
 {
     if (ref_lat < -90.0 || ref_lat > 90.0 || ref_lon < -180.0 || ref_lon > 180.0) return false;
     if (lat_cpr >= 131072 || lon_cpr >= 131072) return false;
-    const double yz = lat_cpr / 131072.0;
-    const double xz = lon_cpr / 131072.0;
-    const double air_dlat = odd ? (360.0 / 59.0) : (360.0 / 60.0);
-    const int nl_ref = cpr_nl(ref_lat);
-    if (nl_ref < 1) return false;
-    const int ni = nl_ref - (odd ? 1 : 0);
-    if (ni < 1) return false;
-    /* Find lat zone */
-    double lat = odd ? air_dlat : (air_dlat / 1.0); /* rough */
-    /* Use standard local CPR approximation */
-    double dlat = odd ? (360.0 / 59.0) : (360.0 / 60.0);
-    double lat0 = floor(ref_lat / dlat + 0.5) * dlat;
-    /* better: compute base */
-    int j = (int)floor(ref_lat / dlat) + (int)floor(yz + 0.5);
-    lat0 = dlat * (j + yz);
-    if (lat0 > 90.0) lat0 -= 180.0;
-    if (lat0 < -90.0) lat0 += 180.0;
-    /* normalize to same hemisphere as reasonable */
-    /* compute longitude */
-    double dlon = 360.0 / ni;
-    int m = (int)floor(ref_lon / dlon) + (int)floor(xz + 0.5);
-    double lon = dlon * (m + xz);
-    if (lon > 180.0) lon -= 360.0;
-    if (lon < -180.0) lon += 360.0;
-    if (lat0 < -90.0 || lat0 > 90.0) return false;
-    /* Check distance from reference */
-    double d = haversine_nm(ref_lat, ref_lon, lat0, lon);
+    const double yz = (double)lat_cpr / 131072.0;
+    const double xz = (double)lon_cpr / 131072.0;
+    const double dLat = 360.0 / (60.0 - (odd ? 1.0 : 0.0));
+    double mod_lat = ref_lat - floor(ref_lat / dLat) * dLat;
+    if (mod_lat < 0.0) mod_lat += dLat;
+    int j = (int)floor(ref_lat / dLat) + (int)floor(mod_lat / dLat - yz + 0.5);
+    double lat = dLat * ((double)j + yz);
+    while (lat >= 270.0) lat -= 360.0;
+    while (lat < -90.0) lat += 360.0;
+    if (lat > 90.0) lat -= 180.0;
+    if (lat < -90.0) lat += 180.0;
+    if (lat < -90.0 || lat > 90.0 || isnan(lat) || isinf(lat)) return false;
+    int nl = cpr_nl(lat);
+    if (nl < 1) return false;
+    int ni = nl - (odd ? 1 : 0);
+    if (ni < 1) ni = 1;
+    const double dLon = 360.0 / (double)ni;
+    double mod_lon = ref_lon - floor(ref_lon / dLon) * dLon;
+    if (mod_lon < 0.0) mod_lon += dLon;
+    int m = (int)floor(ref_lon / dLon) + (int)floor(mod_lon / dLon - xz + 0.5);
+    double lon = dLon * ((double)m + xz);
+    while (lon >= 180.0) lon -= 360.0;
+    while (lon < -180.0) lon += 360.0;
+    if (lon < -180.0 || lon > 180.0 || isnan(lon) || isinf(lon)) return false;
+    double d = haversine_nm(ref_lat, ref_lon, lat, lon);
     if (d > 180.0) return false;
-    *out_lat = lat0;
+    *out_lat = lat;
     *out_lon = lon;
+    return true;
+}
+
+
+
+static bool cpr_local_surface_try(uint32_t lat_cpr, uint32_t lon_cpr, bool odd,
+                                  double ref_lat, double ref_lon, double* out_lat, double* out_lon)
+{
+    if (ref_lat < -90.0 || ref_lat > 90.0 || ref_lon < -180.0 || ref_lon > 180.0) return false;
+    if (lat_cpr >= 131072 || lon_cpr >= 131072) return false;
+    const double yz = (double)lat_cpr / 131072.0;
+    const double xz = (double)lon_cpr / 131072.0;
+    const double dLat = 90.0 / (60.0 - (odd ? 1.0 : 0.0));
+    double mod_lat = ref_lat - floor(ref_lat / dLat) * dLat;
+    if (mod_lat < 0.0) mod_lat += dLat;
+    int j = (int)floor(ref_lat / dLat) + (int)floor(mod_lat / dLat - yz + 0.5);
+    double lat = dLat * ((double)j + yz);
+    double candidates_lat[8];
+    int ncand = 0;
+    for (int off = -4; off <= 4 && ncand < 8; off++) {
+        double c = lat + off * 90.0;
+        while (c >= 90.0) c -= 180.0;
+        while (c < -90.0) c += 180.0;
+        candidates_lat[ncand++] = c;
+    }
+    double bestd = 1e18;
+    double resolved_lat = lat;
+    for (int k = 0; k < ncand; k++) {
+        double dd = fabs(candidates_lat[k] - ref_lat);
+        if (dd < bestd) { bestd = dd; resolved_lat = candidates_lat[k]; }
+    }
+    if (resolved_lat > 90.0) resolved_lat -= 180.0;
+    if (resolved_lat < -90.0) resolved_lat += 180.0;
+    if (resolved_lat < -90.0 || resolved_lat > 90.0) return false;
+    int nl = cpr_nl(resolved_lat);
+    if (nl < 1) return false;
+    int ni = nl - (odd ? 1 : 0);
+    if (ni < 1) ni = 1;
+    const double dLon = 90.0 / (double)ni;
+    double mod_lon = ref_lon - floor(ref_lon / dLon) * dLon;
+    if (mod_lon < 0.0) mod_lon += dLon;
+    int m = (int)floor(ref_lon / dLon) + (int)floor(mod_lon / dLon - xz + 0.5);
+    double lon = dLon * ((double)m + xz);
+    double candidates_lon[8];
+    ncand = 0;
+    for (int off = -4; off <= 4 && ncand < 8; off++) {
+        double c = lon + off * 90.0;
+        while (c >= 180.0) c -= 360.0;
+        while (c < -180.0) c += 360.0;
+        candidates_lon[ncand++] = c;
+    }
+    bestd = 1e18;
+    double resolved_lon = lon;
+    for (int k = 0; k < ncand; k++) {
+        double ad = fabs(candidates_lon[k] - ref_lon);
+        if (ad > 180.0) ad = 360.0 - ad;
+        if (ad < bestd) { bestd = ad; resolved_lon = candidates_lon[k]; }
+    }
+    if (resolved_lon > 180.0) resolved_lon -= 360.0;
+    if (resolved_lon < -180.0) resolved_lon += 360.0;
+    if (resolved_lon < -180.0 || resolved_lon > 180.0) return false;
+    double d = haversine_nm(ref_lat, ref_lon, resolved_lat, resolved_lon);
+    if (d > 45.0) return false;
+    *out_lat = resolved_lat;
+    *out_lon = resolved_lon;
     return true;
 }
 
@@ -294,7 +355,6 @@ static void cpr_try_local(adsb_track_t* t, const adsb_frame_t* f, uint32_t now_m
     bool is_surface = f->cpr_surface;
     s_diag.cpr_local_attempt++;
     if (is_surface) {
-        /* Surface local CPR is possible but more ambiguous; require good reference */
         double ref_lat = 0, ref_lon = 0;
         bool have_ref = false;
         if (t->has_last_pos && (now_ms - t->last_pos_ms < 120000)) {
@@ -306,18 +366,17 @@ static void cpr_try_local(adsb_track_t* t, const adsb_frame_t* f, uint32_t now_m
             s_diag.cpr_missing_ref++;
             return;
         }
-        /* Use similar method but stricter */
         double lat, lon;
-        if (cpr_local_airborne_try(f->cpr_latitude, f->cpr_longitude, f->cpr_odd, ref_lat, ref_lon, &lat, &lon)) {
+        if (cpr_local_surface_try(f->cpr_latitude, f->cpr_longitude, f->cpr_odd, ref_lat, ref_lon, &lat, &lon)) {
             if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
                 s_diag.cpr_local_fail++;
                 s_diag.cpr_invalid++;
                 return;
             }
             double dref = haversine_nm(ref_lat, ref_lon, lat, lon);
-            if (dref > 50.0) { /* surface positions should be closer */
+            if (dref > 45.0) {
                 s_diag.cpr_local_fail++;
-                s_diag.cpr_invalid++;
+                s_diag.cpr_ref_outside++;
                 return;
             }
             t->lat = lat; t->lon = lon; t->has_position = true;
@@ -376,7 +435,7 @@ static void cpr_try_local(adsb_track_t* t, const adsb_frame_t* f, uint32_t now_m
 void adsb_state_update(const adsb_frame_t* f, uint32_t now_ms)
 {
     if (!f || f->icao == 0 || f->icao > 0xffffff) return;
-    adsb_track_t* t = find_or_add(f->icao);
+    adsb_track_t* t = find_or_add_by_addr(f->icao, f->icao_is_icao);
 
     if (f->has_callsign && callsign_ok(f->callsign)) {
         if (t->flight[0] == '\0' || strncmp(t->flight, f->callsign, 8) != 0) {
