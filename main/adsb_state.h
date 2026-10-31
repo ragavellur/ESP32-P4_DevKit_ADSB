@@ -23,6 +23,7 @@ extern "C" {
 #define ADS_STATE_MAX_TRACKS 64
 #define ADS_STATE_TTL_MS 60000u
 #define ADS_STATE_CPR_MAX_AGE_MS 10000u
+#define ADS_STATE_CPR_SURFACE_MAX_AGE_MS 25000u
 
 /* One CRC-valid decoded frame, plain-C mirror of the decoder output.
  * Strings are NUL-terminated. */
@@ -62,14 +63,15 @@ typedef struct {
     uint32_t icao;          /* 24-bit ICAO hex */
     char     flight[9];     /* callsign, NUL-terminated; empty if unknown */
     int      alt_baro;      /* ft, -1 if unknown */
+    bool     alt_is_gnss;   /* true if altitude is GNSS height */
     int      gs;            /* kts, -1 if unknown */
     int      heading;       /* deg true, -1 if unknown */
     int      baro_rate;     /* ft/min, -32768 if unknown */
     double   lat, lon;      /* valid only if has_position true */
     bool     has_position;
     int      signal;        /* dB above noise floor */
-    uint32_t last_seen_ms;  /* monotonic ms tick of last frame */
-    uint32_t revision;      /* bumped on every field change */
+    uint32_t last_seen_ms;
+    uint32_t revision;
 } adsb_aircraft_t;
 
 #define ADS_STATE_SQUAWK_UNKNOWN 0

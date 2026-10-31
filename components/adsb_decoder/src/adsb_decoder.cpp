@@ -90,8 +90,15 @@ bool parse(const uint8_t* bytes, uint8_t bit_length, uint16_t signal, Frame* out
     out->cf = cf;
     if (df == 18) {
       if (cf == 0) out->icao_is_icao = true;
-      else if (cf == 1 || cf == 5 || cf == 6) out->icao_is_icao = false;
-      else out->icao_is_icao = (cf == 2 || cf == 3);
+      else if (cf == 1 || cf == 6) out->icao_is_icao = false; /* CF1/CF6 non-ICAO/TIS-B per common handling */
+      else if (cf == 5) out->icao_is_icao = false;
+      else if (cf == 2 || cf == 3) out->icao_is_icao = true;
+      else if (cf == 4 || cf == 7) {
+        /* Management/reserved - be conservative, do not assume ICAO ADS-B */
+        out->icao_is_icao = false;
+      } else {
+        out->icao_is_icao = false;
+      }
     }
     out->type_code = static_cast<uint8_t>(bits(bytes, 32, 5));
     out->signal = signal;

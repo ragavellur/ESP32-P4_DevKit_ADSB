@@ -36,6 +36,7 @@ typedef struct {
     uint32_t revision;
     int      signal;
     int      alt_baro;
+    bool     alt_is_gnss;
     int      gs;
     int      heading;
     int      baro_rate;
@@ -260,8 +261,9 @@ static void cpr_try_pair(adsb_track_t* t, uint32_t now_ms)
         return;
     }
     bool is_surface = t->cpr_surface[0] || t->cpr_surface[1];
-    if (now_ms - t->cpr_ms[0] > ADS_STATE_CPR_MAX_AGE_MS ||
-        now_ms - t->cpr_ms[1] > ADS_STATE_CPR_MAX_AGE_MS) {
+    uint32_t max_age = is_surface ? ADS_STATE_CPR_SURFACE_MAX_AGE_MS : ADS_STATE_CPR_MAX_AGE_MS;
+    if (now_ms - t->cpr_ms[0] > max_age ||
+        now_ms - t->cpr_ms[1] > max_age) {
         s_diag.cpr_stale++;
         return;
     }
@@ -444,12 +446,11 @@ void adsb_state_update(const adsb_frame_t* f, uint32_t now_ms)
         }
     }
     if (f->has_altitude && alt_ok(f->altitude_ft)) {
-        /* For TC5-8 surface we must not store altitude as baro from position; but altitude_ft comes from parsed frame
-         * - caller/state must respect cpr_surface; we still store if valid but caller should be careful */
-        if (!(f->cpr_surface && f->has_cpr)) {
-            t->alt_baro = f->altitude_ft;
+        if (f->cpr_surface && f->has_cpr) {
+            /* surface position messages don't carry barometric altitude */
         } else {
-            /* surface position messages don't carry barometric altitude in same way - skip */
+            t->alt_baro = f->altitude_ft;
+            t->alt_is_gnss = f->altitude_is_gnss;
         }
     }
     if (f->has_speed && gs_ok(f->speed_kts)) t->gs = f->speed_kts;
@@ -515,6 +516,7 @@ uint32_t adsb_state_fill(adsb_aircraft_t* out, uint32_t cap)
         a->icao = t->icao;
         memcpy(a->flight, t->flight, sizeof(a->flight));
         a->alt_baro = t->alt_baro;
+        a->alt_is_gnss = t->alt_is_gnss;
         a->gs = t->gs;
         a->heading = t->heading;
         a->baro_rate = t->baro_rate;

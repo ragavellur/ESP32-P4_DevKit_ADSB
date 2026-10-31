@@ -94,11 +94,12 @@ static void put_aircraft_json(char *buf, size_t cap, uint32_t *out_count)
         const adsb_aircraft_t *t = &tracks[i];
         int w = snprintf(buf + off, cap - (size_t)off,
             "%s{\"hex\":\"%06lx\",\"flight\":\"%s\",\"alt_baro\":%d,"
+            "\"altitude_is_gnss\":%s,"
             "\"gs\":%d,\"heading\":%d,\"baro_rate\":%d,\"signal\":%d",
             i ? "," : "",
             (unsigned long)t->icao,
             t->flight[0] ? t->flight : "",
-            t->alt_baro,
+            t->alt_baro, t->alt_is_gnss ? "true" : "false",
             t->gs,
             t->heading,
             t->baro_rate,
