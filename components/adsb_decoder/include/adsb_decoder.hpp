@@ -9,11 +9,15 @@ struct Frame {
   uint8_t bytes[14]{};
   uint8_t bit_length = 0;
   uint32_t icao = 0;
+  bool icao_is_icao = true;
+  uint8_t df = 0;
+  uint8_t cf = 0;
   uint8_t type_code = 0;
   char callsign[9]{};
   bool has_callsign = false;
   int altitude_ft = 0;
   bool has_altitude = false;
+  bool altitude_is_gnss = false;
   int speed_kts = 0;
   bool has_speed = false;
   int heading_deg = 0;
@@ -24,6 +28,7 @@ struct Frame {
   uint32_t cpr_longitude = 0;
   bool cpr_odd = false;
   bool has_cpr = false;
+  bool cpr_surface = false;
   uint16_t signal = 0;
   /* Preamble start position in magnitudes buffer (sample index) */
   uint32_t preamble_offset_samples = 0;
@@ -36,7 +41,9 @@ struct Stats {
   uint32_t preambles = 0;
   uint32_t frames = 0;
   uint32_t df17 = 0;
+  uint32_t df18 = 0;
   uint32_t crc_ok = 0;
+  uint32_t df11 = 0;
   uint16_t magnitude_min = 0xffff;
   uint16_t magnitude_max = 0;
 };
@@ -87,6 +94,8 @@ class Decoder {
     bool crc_fix_enabled_ = false;
     uint32_t sample_rate_sps_ = 2400000;
     uint32_t preamble_threshold_ = 100;
+  public:
+    size_t overlap_samples() const { return overlap_; }
 };
 
 }  // namespace adsb_radar::adsb_rx

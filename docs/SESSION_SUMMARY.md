@@ -214,3 +214,15 @@ over HTTP; a cold boot with it already persisted was never tested (L33).
 Fix: gate resolution on `IP_EVENT_ETH_GOT_IP` and start the feeder after
 `eth_netif_start()`. Verified stable (0 reboots in 20 s, feeder connected,
 decode healthy). Shipped as `v0.5.1-feeder-bootloop-fix`.
+
+## 2026-10-26 — MLAT sync pairs fix (fix/mlat-sync-pairs), build-only
+
+- On branch `fix/mlat-sync-pairs` (HEAD 72f94da base + local changes), modified:
+  - `components/mlat_client/include/mlat_client.h`
+  - `components/mlat_client/src/mlat_client.c`
+  - `main/http_radar.c`
+  - `docs/LEARNING.md`
+  - `docs/TASKS_TRACKER.md`
+  - `docs/SESSION_SUMMARY.md`
+- Implemented hardenings: `send_all()` with partial/EINTR/EAGAIN handling and reconnect on failure; `recv()==0`/errors trigger reconnect; evictable ICAO sync cache (oldest-last-seen/age-based); accept DF17 TC 9-18 and 20-22; preserve `sample_rate_sps==0` for real fallback timestamps; removed ping; sync JSON shape unchanged. `/api/mlat` shows `sync_pairs_seen`/`sync_sent`, buffer increased to 1536.
+- Verified: `idf.py build` success, `python3 tests/web/check_ui_api.py` 20/20 passed, `git diff --check` clean. No flash/commit/push performed. MLAT peer formation not hardware-verified. The web test does not cover MLAT/sync.

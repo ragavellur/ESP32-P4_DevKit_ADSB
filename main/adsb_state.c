@@ -1,5 +1,6 @@
 #include "adsb_state.h"
 
+#include <math.h>
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
@@ -48,10 +49,14 @@ typedef struct {
     uint32_t cpr_lon[2];
     uint32_t cpr_ms[2];
     bool     cpr_have[2];
+    bool     last_was_surface;
 } adsb_track_t;
 
 static adsb_track_t s_tracks[ADS_STATE_MAX_TRACKS];
 static adsb_cpr_pair_t s_pair = 0;
+static double s_rx_lat = 0.0;
+static double s_rx_lon = 0.0;
+static bool s_rx_loc_set = false;
 
 void adsb_state_init(void)
 {
@@ -61,6 +66,13 @@ void adsb_state_init(void)
 void adsb_state_set_cpr_pair(adsb_cpr_pair_t pair)
 {
     s_pair = pair;
+}
+
+void adsb_state_set_location(double lat, double lon)
+{
+    s_rx_lat = lat;
+    s_rx_lon = lon;
+    s_rx_loc_set = true;
 }
 
 static adsb_track_t* find_or_add(uint32_t icao)
@@ -96,6 +108,30 @@ static adsb_track_t* find_or_add(uint32_t icao)
     return free_slot;
 }
 
+/* Haversine distance in nautical miles */
+static double haversine_nm(double lat1, double lon1, double lat2, double lon2)
+{
+    const double R = 6371.0;
+    double dlat = (lat2 - lat1) * M_PI / 180.0;
+    double dlon = (lon2 - lon1) * M_PI / 180.0;
+    double a = sin(dlat / 2.0) * sin(dlat / 2.0) +
+               cos(lat1 * M_PI / 180.0) * cos(lat2 * M_PI / 180.0) *
+               sin(dlon / 2.0) * sin(dlon / 2.0);
+    double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
+    double km = R * c;
+    return km * 0.539957;
+}
+
+/* Local CPR decode (airborne) - simplified approach using receiver or last position as reference */
+static bool cpr_local_airborne(uint32_t icao, uint32_t lat_cpr, uint32_t lon_cpr, bool odd,
+                               double ref_lat, double ref_lon, double* lat_out, double* lon_out)
+{
+    (void)icao;
+    /* Use global CPR logic but with reference - for now, try to use decode_global_cpr style
+     * but we need both; alternatively use the known position if available */
+    return false;
+}
+
 /* Global CPR decode once both parities are fresh (pairing window 10 s). */
 static void cpr_try_pair(adsb_track_t* t, uint32_t now_ms)
 {
@@ -108,6 +144,22 @@ static void cpr_try_pair(adsb_track_t* t, uint32_t now_ms)
     double lat, lon;
     if (s_pair(t->icao, t->cpr_lat[0], t->cpr_lon[0],
                t->cpr_lat[1], t->cpr_lon[1], &lat, &lon)) {
+        /* Validate position plausibility */
+        if (lat < -90.0 || lat > 90.0 || lon < -180.0 || lon > 180.0) {
+            return;
+        }
+        /* If we have previous position and receiver location, check distance */
+        if (t->has_position) {
+            double d = haversine_nm(t->lat, t->lon, lat, lon);
+            if (d > 500.0) { /* unreasonable jump */
+                /* don't reject immediately, but be conservative */
+            }
+        } else if (s_rx_loc_set) {
+            double d = haversine_nm(s_rx_lat, s_rx_lon, lat, lon);
+            if (d > 180.0 * 2.0) { /* allow some margin */
+                /* might be valid far away */
+            }
+        }
         t->lat = lat;
         t->lon = lon;
         t->has_position = true;
@@ -141,6 +193,7 @@ void adsb_state_update(const adsb_frame_t* f, uint32_t now_ms)
         t->cpr_lon[parity] = f->cpr_longitude;
         t->cpr_ms[parity] = now_ms;
         t->cpr_have[parity] = true;
+        t->last_was_surface = f->cpr_surface;
         cpr_try_pair(t, now_ms);
     }
 

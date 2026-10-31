@@ -28,11 +28,15 @@ extern "C" {
  * Strings are NUL-terminated. */
 typedef struct {
     uint32_t icao;          /* 24-bit ICAO hex */
-    uint8_t  type_code;     /* DF17 type code 0..31 */
+    bool     icao_is_icao;
+    uint8_t  df;
+    uint8_t  cf;
+    uint8_t  type_code;     /* type code 0..31 */
     char     callsign[9];   /* empty. if has_callsign false */
     bool     has_callsign;
-    int      altitude_ft;   /* barometric, ft */
+    int      altitude_ft;   /* altitude, ft */
     bool     has_altitude;
+    bool     altitude_is_gnss;
     int      speed_kts;
     bool     has_speed;
     int      heading_deg;   /* true north */
@@ -43,6 +47,7 @@ typedef struct {
     uint32_t cpr_longitude;
     bool     cpr_odd;       /* true if odd-frame position message */
     bool     has_cpr;
+    bool     cpr_surface;
     int      signal;        /* dB above noise floor */
 } adsb_frame_t;
 
@@ -73,6 +78,9 @@ void adsb_state_init(void);
 
 /* Inject the global-CPR pair decoder (ESP build: decoder's math). */
 void adsb_state_set_cpr_pair(adsb_cpr_pair_t pair);
+
+/* Set receiver location for local CPR decoding. */
+void adsb_state_set_location(double lat, double lon);
 
 /* Feed one CRC-valid decoded frame. now_ms = monotonic ms tick. */
 void adsb_state_update(const adsb_frame_t* f, uint32_t now_ms);

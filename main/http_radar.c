@@ -40,7 +40,10 @@ static void nvs_load_receiver(void)
 {
     nvs_handle_t h;
     int32_t lat = 0, lon = 0;
-    if (nvs_open("radar", NVS_READONLY, &h) != ESP_OK) return;
+    if (nvs_open("radar", NVS_READONLY, &h) != ESP_OK) {
+        adsb_state_set_location(s_receiver_lat, s_receiver_lon);
+        return;
+    }
     /* Accept any stored value including 0.0 (equator/prime meridian). */
     if (nvs_get_i32(h, "lat", &lat) == ESP_OK &&
         nvs_get_i32(h, "lon", &lon) == ESP_OK) {
@@ -48,6 +51,7 @@ static void nvs_load_receiver(void)
         s_receiver_lon = lon / 1e7;
     }
     nvs_close(h);
+    adsb_state_set_location(s_receiver_lat, s_receiver_lon);
 }
 
 /* store receiver coords so /api/status stays correct across reboots */
@@ -55,6 +59,7 @@ void http_radar_set_receiver(double lat, double lon)
 {
     s_receiver_lat = lat;
     s_receiver_lon = lon;
+    adsb_state_set_location(lat, lon);
     nvs_handle_t h;
     if (nvs_open("radar", NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_i32(h, "lat", (int32_t)(lat * 1e7));
@@ -192,7 +197,8 @@ static esp_err_t h_debug(httpd_req_t *req)
         "\"health\":{\"usb\":%u,\"rf\":%u,\"overall\":%u,"
         "\"efficiency\":%.3f,\"advice\":\"%s\"},"
         "\"pipe\":{\"overruns\":%lu,\"driver_drops\":%lu,\"ring_drops\":%lu,\"ring_free\":%lu},"
-        "\"dsp\":{\"busy_pct\":%.1f,\"samples_per_s\":%.0f,\"required_sps\":%lu}}",
+        "\"dsp\":{\"busy_pct\":%.1f,\"samples_per_s\":%.0f,\"required_sps\":%lu},"
+        "\"decoder\":{\"df11\":%lu,\"df17\":%lu,\"df18\":%lu}}",
         (unsigned long long)(esp_timer_get_time() / 1000),
         st.phase == RTL_PIPELINE_STREAMING ? "streaming" :
         st.phase == RTL_PIPELINE_OPTAINING ? "obtaining" :
@@ -220,7 +226,8 @@ static esp_err_t h_debug(httpd_req_t *req)
         (unsigned long)st.ring_drops,
         (unsigned long)st.ring_free_slots,
         (double)d.dsp_busy_pct, (double)d.dsp_samples_per_s,
-        (unsigned long)d.programmed_sps);
+        (unsigned long)d.programmed_sps,
+        (unsigned long)d.df11_total, (unsigned long)d.df17_total, (unsigned long)d.df18_total);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -868,13 +875,14 @@ static esp_err_t h_mlat_get(httpd_req_t *req)
     mlat_client_get_stats(&st);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
-    char buf[1024];
+    char buf[1536];
     snprintf(buf, sizeof(buf),
              "{\"enabled\":%s,\"host\":\"%s\",\"port\":%u,\"uuid\":\"%s\",\"station_name\":\"%s\","
              "\"lat\":%.6f,\"lon\":%.6f,\"alt_m\":%.1f,\"privacy\":%s,\"return_results\":%s,"
              "\"use_udp\":%s,\"use_zlib\":%s,"
              "\"stats\":{\"frames_observed\":%u,\"frames_eligible\":%u,\"frames_submitted\":%u,"
              "\"frames_dropped_queue\":%u,\"frames_invalid_ts\":%u,\"frames_ts_preamble\":%u,\"frames_ts_fallback\":%u,"
+             "\"sync_pairs_seen\":%u,\"sync_sent\":%u,\"tracking_seen_sent\":%u,\"tracking_lost_sent\":%u,"
              "\"tcp_sent\":%u,\"udp_sent\":%u,"
              "\"reconnects\":%u,\"protocol_errors\":%u,\"server_results\":%u,\"connected\":%s,"
              "\"queue_depth\":%u,\"queue_high_water\":%u}}",
@@ -884,7 +892,8 @@ static esp_err_t h_mlat_get(httpd_req_t *req)
              cfg.use_udp ? "true" : "false", cfg.use_zlib ? "true" : "false",
              (unsigned)st.frames_observed, (unsigned)st.frames_eligible, (unsigned)st.frames_submitted,
              (unsigned)st.frames_dropped_queue, (unsigned)st.frames_invalid_ts, (unsigned)st.frames_ts_preamble,
-             (unsigned)st.frames_ts_fallback, (unsigned)st.tcp_sent,
+             (unsigned)st.frames_ts_fallback, (unsigned)st.sync_pairs_seen, (unsigned)st.sync_sent,
+             (unsigned)st.tracking_seen_sent, (unsigned)st.tracking_lost_sent, (unsigned)st.tcp_sent,
              (unsigned)st.udp_sent, (unsigned)st.reconnects, (unsigned)st.protocol_errors,
              (unsigned)st.server_results, st.connected ? "true" : "false",
              (unsigned)st.queue_depth, (unsigned)st.queue_high_water);

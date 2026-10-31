@@ -75,6 +75,8 @@ typedef struct {
     uint32_t frames_total;         /**< candidate frames (cumulative) */
     uint32_t crc_total;            /**< CRC-valid frames (cumulative) */
     uint32_t df17_total;           /**< DF17 count (cumulative) */
+    uint32_t df18_total;
+    uint32_t df11_total;
     uint32_t bytes_total;          /**< IQ bytes delivered by driver (cumulative) */
     uint16_t mag_min;              /**< decoder magnitude min (cumulative) */
     uint16_t mag_max;              /**< decoder magnitude max (cumulative) */

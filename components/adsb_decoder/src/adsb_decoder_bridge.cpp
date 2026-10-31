@@ -6,6 +6,8 @@
 #include "adsb_decoder_bridge.h"
 #include "adsb_decoder.hpp"
 
+extern "C" size_t adsb_decoder_bridge_get_overlap_samples(void);
+
 /* Minimal single-decoder C bridge. The RTL DSP task is the only consumer
  * (single-threaded); no allocation on the hot path. */
 
@@ -49,8 +51,15 @@ static void on_frame(const Frame &frame, void *ctx)
 {
     (void)ctx;
     ++s_app_frames;
-    if (frame.type_code >= 1 && frame.type_code <= 4) {
+    if (frame.df == 17 && frame.type_code >= 1 && frame.type_code <= 4) {
         ++s_app_df17;
+    } else if (frame.df == 17) {
+        /* keep counting DF17 messages in app stats for backward compat where possible */
+        if ((frame.type_code >= 5 && frame.type_code <= 8) ||
+            (frame.type_code >= 9 && frame.type_code <= 18) ||
+            (frame.type_code >= 19 && frame.type_code <= 22)) {
+            /* do not increment s_app_df17 for position/vel categories; keep as-is */
+        }
     }
     if (frame.has_callsign || frame.has_altitude || frame.has_speed ||
         frame.has_heading || frame.has_vertical_rate) {
@@ -69,6 +78,9 @@ static void on_frame(const Frame &frame, void *ctx)
     if (s_hook) {
         adsb_frame_info_t f{};
         f.icao = frame.icao;
+        f.icao_is_icao = frame.icao_is_icao;
+        f.df = frame.df;
+        f.cf = frame.cf;
         f.type_code = frame.type_code;
         f.has_callsign = frame.has_callsign;
         if (frame.has_callsign) {
@@ -76,6 +88,7 @@ static void on_frame(const Frame &frame, void *ctx)
         }
         f.altitude_ft = frame.altitude_ft;
         f.has_altitude = frame.has_altitude;
+        f.altitude_is_gnss = frame.altitude_is_gnss;
         f.speed_kts = frame.speed_kts;
         f.has_speed = frame.has_speed;
         f.heading_deg = frame.heading_deg;
@@ -86,6 +99,7 @@ static void on_frame(const Frame &frame, void *ctx)
         f.cpr_longitude = frame.cpr_longitude;
         f.cpr_odd = frame.cpr_odd;
         f.has_cpr = frame.has_cpr;
+        f.cpr_surface = frame.cpr_surface;
         f.signal = frame.signal;
         /* Raw frame for the feeder. Frame.bytes holds exactly bit_length/8
          * bytes and is already CRC-corrected when crc_fix is on, so this is
@@ -101,22 +115,23 @@ static void on_frame(const Frame &frame, void *ctx)
         /* Sample-derived timestamp using block context + preamble offset.
          * Preamble offset is in magnitudes buffer (includes overlap from previous block).
          * We need to compute offset within current block. */
-        if (s_has_cur_ctx && s_cur_ctx.sample_rate_sps > 0 && s_cur_ctx.block_time_us > 0) {
-            /* Estimate overlap samples - decoder carries ~kTrailingSamples (~200 samples at 2.4MSPS)
-             * We'll use a conservative approach: if preamble_offset is large relative to typical
-             * block processing, it might be in overlap; but easier to just use block time as base
-             * and add offset estimate. For better accuracy, pipeline needs to track overlap. */
+        if (s_has_cur_ctx && s_cur_ctx.sample_rate_sps > 0) {
+            f.sample_index = s_cur_ctx.block_start_sample;
+            f.sample_rate_sps = s_cur_ctx.sample_rate_sps;
+            size_t ovl = adsb_decoder_bridge_get_overlap_samples();
+            uint32_t po_adj = f.preamble_offset_samples;
+            if (ovl > 0 && po_adj >= (uint32_t)ovl) {
+                po_adj = f.preamble_offset_samples - (uint32_t)ovl;
+            } else {
+                po_adj = 0;
+            }
+            f.preamble_offset_samples = po_adj;
+            f.rx_timestamp_sample_us = ((int64_t)(f.sample_index + (uint64_t)f.preamble_offset_samples) * 1000000LL) /
+                                       (int64_t)f.sample_rate_sps;
+        } else if (s_has_cur_ctx && s_cur_ctx.block_time_us > 0) {
             f.rx_timestamp_sample_us = s_cur_ctx.block_time_us;
             f.sample_index = s_cur_ctx.block_start_sample;
             f.sample_rate_sps = s_cur_ctx.sample_rate_sps;
-            /* If we have preamble offset, we can refine - offset is in samples at decoder rate */
-            if (f.preamble_offset_samples > 0 && f.sample_rate_sps > 0) {
-                /* Add small correction based on preamble position within the processed window */
-                /* This is approximate but better than nothing */
-                int64_t offset_us = ((int64_t)f.preamble_offset_samples * 1000000LL) / (int64_t)f.sample_rate_sps;
-                /* Subtract typical processing delay/overlap estimate (~1ms) as rough correction */
-                f.rx_timestamp_sample_us = s_cur_ctx.block_time_us - 1000 + offset_us / 10; /* rough */
-            }
         }
         {
             const uint32_t slot = s_capture_head % kCaptureDepth;
@@ -139,6 +154,8 @@ static void pump_stats(adsb_decoder_bridge_stats_t *out)
     out->decoder_preambles = s.preambles;
     out->decoder_frames = s.frames;
     out->decoder_df17 = s.df17;
+    out->decoder_df18 = s.df18;
+    out->decoder_df11 = s.df11;
     out->decoder_crc_ok = s.crc_ok;
     out->decoder_magnitude_min = s.magnitude_min;
     out->decoder_magnitude_max = s.magnitude_max;
@@ -275,6 +292,11 @@ void adsb_decoder_bridge_set_aggressive(bool enable)
 void adsb_decoder_bridge_set_crc_fix(bool enable)
 {
     s_dec.set_crc_fix(enable);
+}
+
+extern "C" size_t adsb_decoder_bridge_get_overlap_samples(void)
+{
+    return s_dec.overlap_samples();
 }
 
 void adsb_decoder_bridge_set_sample_rate(uint32_t sample_rate_sps)

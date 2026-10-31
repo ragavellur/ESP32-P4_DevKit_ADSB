@@ -37,6 +37,10 @@ typedef struct {
     uint32_t frames_invalid_ts;
     uint32_t frames_ts_preamble;
     uint32_t frames_ts_fallback;
+    uint32_t sync_pairs_seen;
+    uint32_t sync_sent;
+    uint32_t tracking_seen_sent;
+    uint32_t tracking_lost_sent;
     uint32_t tcp_sent;
     uint32_t udp_sent;
     uint32_t reconnects;

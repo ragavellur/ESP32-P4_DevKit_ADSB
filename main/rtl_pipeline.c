@@ -375,11 +375,15 @@ static void bridge_to_state(const adsb_frame_info_t *f, uint32_t now_ms)
     adsb_frame_t sf;
     memset(&sf, 0, sizeof(sf));
     sf.icao = f->icao;
+    sf.icao_is_icao = true;
+    sf.df = f->df;
+    sf.cf = f->cf;
     sf.type_code = f->type_code;
     memcpy(sf.callsign, f->callsign, sizeof(sf.callsign));
     sf.has_callsign = f->has_callsign;
     sf.altitude_ft = f->altitude_ft;
     sf.has_altitude = f->has_altitude;
+    sf.altitude_is_gnss = f->altitude_is_gnss;
     sf.speed_kts = f->speed_kts;
     sf.has_speed = f->has_speed;
     sf.heading_deg = f->heading_deg;
@@ -390,6 +394,7 @@ static void bridge_to_state(const adsb_frame_info_t *f, uint32_t now_ms)
     sf.cpr_longitude = f->cpr_longitude;
     sf.cpr_odd = f->cpr_odd;
     sf.has_cpr = f->has_cpr;
+    sf.cpr_surface = f->cpr_surface;
     sf.signal = f->signal;
     if (s_ctx.track_mutex) xSemaphoreTake(s_ctx.track_mutex, portMAX_DELAY);
     adsb_state_update(&sf, now_ms);
@@ -466,6 +471,11 @@ static void on_event(esp_rtl_sdr_event_t event, const void *payload, void *ctx)
         if (blk->bytes > IQ_BLOCK_BYTES) {
             break;
         }
+        uint32_t sps_m = blk->sample_rate_sps ? blk->sample_rate_sps : ADSB_RATE_SPS;
+        uint64_t pairs_in_block = blk->bytes / 2;
+        const uint64_t block_start_sample = s_ctx.mlat_sample_counter;
+        s_ctx.mlat_sample_counter += pairs_in_block;
+
         uint32_t idx = ring_take_free();
         if (idx == UINT32_MAX) {
             /* The decoder could not keep up. This block is genuinely lost, and
@@ -479,12 +489,9 @@ static void on_event(esp_rtl_sdr_event_t event, const void *payload, void *ctx)
         s_ctx.slots[idx].sequence = blk->sequence;
         /* MLAT timing metadata */
         int64_t tnow_m = (blk->host_timestamp_us != 0) ? blk->host_timestamp_us : esp_timer_get_time();
-        uint32_t sps_m = blk->sample_rate_sps ? blk->sample_rate_sps : ADSB_RATE_SPS;
-        uint64_t pairs_in_block = blk->bytes / 2;
-        s_ctx.slots[idx].block_start_sample = s_ctx.mlat_sample_counter;
+        s_ctx.slots[idx].block_start_sample = block_start_sample;
         s_ctx.slots[idx].block_time_us = tnow_m;
         s_ctx.slots[idx].sample_rate_sps = sps_m;
-        s_ctx.mlat_sample_counter += pairs_in_block;
         s_ctx.mlat_last_block_us = tnow_m;
         ring_give_filled(idx);
         break;
@@ -548,11 +555,11 @@ static void adsb_decoder_task(void *arg)
 
     for (;;) {
         uint32_t idx;
-        const int64_t t_start = esp_timer_get_time();
         if (xQueueReceive(s_ctx.filled_q, &idx, portMAX_DELAY) != pdTRUE) {
             continue;
         }
         iq_slot_t *slot = &s_ctx.slots[idx];
+        const int64_t t_start = esp_timer_get_time();
         if (s_ctx.decode_ok) {
             adsb_decoder_block_ctx_t bctx = {
                 .block_start_sample = slot->block_start_sample,
@@ -940,6 +947,8 @@ void rtl_pipeline_get_debug(rtl_pipeline_debug_t *out)
     out->frames_total = ds.decoder_frames;
     out->crc_total = ds.decoder_crc_ok;
     out->df17_total = ds.decoder_df17;
+    out->df18_total = ds.decoder_df18;
+    out->df11_total = ds.decoder_df11;
     out->mag_min = ds.decoder_magnitude_min;
     out->mag_max = ds.decoder_magnitude_max;
     out->bytes_total = s_ctx.metrics.bytes_total;
@@ -1032,7 +1041,8 @@ esp_err_t rtl_pipeline_apply_settings(void)
         last_applied_sample_rate = s_settings.sample_rate_sps;
         /* Update decoder sample rate */
 adsb_decoder_bridge_set_sample_rate(s_settings.sample_rate_sps);
-    adsb_decoder_bridge_set_preamble_threshold(ADSB_PREAMBLE_THRESHOLD);
+    adsb_decoder_bridge_set_preamble_threshold(s_settings.aggressive ? (ADSB_PREAMBLE_THRESHOLD > 70 ? ADSB_PREAMBLE_THRESHOLD - 15 : ADSB_PREAMBLE_THRESHOLD)
+                                                                         : ADSB_PREAMBLE_THRESHOLD);
         /* Signal pipeline restart needed */
         return ESP_ERR_INVALID_STATE; // Special code to indicate restart needed
     }

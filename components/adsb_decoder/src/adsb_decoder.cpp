@@ -73,17 +73,32 @@ bool parse(const uint8_t* bytes, uint8_t bit_length, uint16_t signal, Frame* out
   const int data_bits = bit_length - 24;
   const uint32_t syndrome = crc_payload(bytes, data_bits) ^ bits(bytes, data_bits, 24);
   if (!((df == 17 && bit_length == 112 && syndrome == 0) ||
+        (df == 18 && bit_length == 112 && syndrome == 0) ||
         (df == 11 && bit_length == 56 && syndrome <= 0x7f)))
     return false;
   std::memcpy(out->bytes, bytes, bit_length / 8);
   out->bit_length = bit_length;
+  out->df = df;
   out->icao = bits(bytes, 8, 24);
-  if (df != 17) {
+  out->icao_is_icao = true;
+  if (df == 11) {
     out->signal = signal;
     return true;
   }
-  out->type_code = static_cast<uint8_t>(bits(bytes, 32, 5));
-  out->signal = signal;
+  if (df == 17 || df == 18) {
+    const uint8_t cf = bytes[0] & 0x07;
+    out->cf = cf;
+    if (df == 18) {
+      if (cf == 0) out->icao_is_icao = true;
+      else if (cf == 1 || cf == 5 || cf == 6) out->icao_is_icao = false;
+      else out->icao_is_icao = (cf == 2 || cf == 3);
+    }
+    out->type_code = static_cast<uint8_t>(bits(bytes, 32, 5));
+    out->signal = signal;
+  } else {
+    out->signal = signal;
+    return true;
+  }
 
   if (out->type_code >= 1 && out->type_code <= 4) {
     size_t length = 8;
@@ -96,17 +111,21 @@ bool parse(const uint8_t* bytes, uint8_t bit_length, uint16_t signal, Frame* out
     while (length && out->callsign[length - 1] == ' ') --length;
     out->callsign[length] = '\0';
     out->has_callsign = length != 0;
-  } else if (out->type_code >= 9 && out->type_code <= 18) {
+  } else if ((out->type_code >= 5 && out->type_code <= 8) ||
+             (out->type_code >= 9 && out->type_code <= 18) ||
+             (out->type_code >= 20 && out->type_code <= 22)) {
     const uint16_t encoded = static_cast<uint16_t>(bits(bytes, 40, 12));
     if ((encoded & 0x10u) != 0) {
       const int n = ((encoded & 0xfe0u) >> 1) | (encoded & 0x0fu);
       out->altitude_ft = n * 25 - 1000;
       out->has_altitude = true;
     }
+    out->altitude_is_gnss = (out->type_code >= 20 && out->type_code <= 22);
     out->cpr_odd = bits(bytes, 53, 1) != 0;
     out->cpr_latitude = bits(bytes, 54, 17);
     out->cpr_longitude = bits(bytes, 71, 17);
     out->has_cpr = true;
+    out->cpr_surface = (out->type_code >= 5 && out->type_code <= 8);
   } else if (out->type_code == 19) {
     const uint8_t subtype = static_cast<uint8_t>(bits(bytes, 37, 3));
     const int scale = (subtype == 2 || subtype == 4) ? 4 : 1;
@@ -405,7 +424,10 @@ void Decoder::process_pairs(const uint8_t* data, size_t pairs, FrameCallback cal
   }
 
   /* --- preamble detection + multi-phase slicing (readsb demodulate2400) --- */
-  const uint32_t threshold = preamble_threshold_;
+      uint32_t threshold = preamble_threshold_;
+      if (aggressive_) {
+        if (threshold > 64) threshold = threshold - 10;
+      }
   /* Trailing samples needed for the slicer past the last preamble candidate. */
   const size_t need = kMaxFrameSamples + 24;
   if (count > need) {
@@ -466,8 +488,10 @@ void Decoder::process_pairs(const uint8_t* data, size_t pairs, FrameCallback cal
       if (!have_candidate) continue;
       ++stats_.preambles;
       ++stats_.frames;
-      const uint8_t df = best.bytes[0] >> 3;
+      const uint8_t df = best.df ? best.df : (best.bytes[0] >> 3);
       if (df == 17) ++stats_.df17;
+      if (df == 18) ++stats_.df18;
+      if (df == 11) ++stats_.df11;
       ++stats_.crc_ok;
       best.preamble_offset_samples = static_cast<uint32_t>(pos);
       if (callback) callback(best, context);

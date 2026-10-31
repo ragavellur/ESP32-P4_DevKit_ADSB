@@ -30,6 +30,8 @@ typedef struct {
     uint32_t decoder_preambles;
     uint32_t decoder_frames;
     uint32_t decoder_df17;
+    uint32_t decoder_df18;
+    uint32_t decoder_df11;
     uint32_t decoder_crc_ok;
     uint16_t decoder_magnitude_min;
     uint16_t decoder_magnitude_max;
@@ -61,11 +63,15 @@ uint32_t adsb_decoder_bridge_get_capture(adsb_captured_frame_t* out, uint32_t ca
 /* Every CRC-valid frame, mirrored to plain C. NUL-terminated strings. */
 typedef struct {
     uint32_t icao;
+    bool     icao_is_icao;
+    uint8_t  df;
+    uint8_t  cf;
     uint8_t  type_code;
     char     callsign[9];
     bool     has_callsign;
     int      altitude_ft;
     bool     has_altitude;
+    bool     altitude_is_gnss;
     int      speed_kts;
     bool     has_speed;
     int      heading_deg;
@@ -76,12 +82,11 @@ typedef struct {
     uint32_t cpr_longitude;
     bool     cpr_odd;
     bool     has_cpr;
+    bool     cpr_surface;
     int      signal; /* dB above noise floor (pulse - quiet) */
-    /* Raw Mode-S frame, exactly as demodulated (DF11 = 7 bytes, DF17 = 14).
-     * Required by the BharatRadar feeder, which forwards raw frames rather
-     * than decoded fields. bytes[] is only valid for bit_length/8 bytes. */
+    /* Raw Mode-S frame, exactly as demodulated (DF11 = 7 bytes, DF17 = 14, DF18 = 14). */
     uint8_t  bytes[14];
-    uint8_t  bit_length;   /* 56 (DF11) or 112 (DF17) */
+    uint8_t  bit_length;
     int64_t  rx_timestamp_us; /* esp_timer at decode (legacy) */
     /* Sample-derived reception time for MLAT (preferred). */
     int64_t  rx_timestamp_sample_us;

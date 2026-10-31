@@ -722,3 +722,15 @@ granted promptly and **the entire web server wedged** (`connection reset by
 peer` after ~16 ms) while the receiver kept decoding. The ladder is a compile-time
 table in `rtl_pipeline.c` already; serve it from there. **Never take a driver
 lock on a polled HTTP path.**
+
+
+## L39 — MLAT sync pairs: peer formation requires sync before mlat, correct sample timing, cache/reconnect hardening
+
+BharatRadar MLAT peer formation needs:
+- Send `{"sync":{"et":...,"ot":...,"em":"<28 hex>","om":"<28 hex>"}}` pairs for valid DF17 airborne-position CPR (types 9-18, 20-22) using sample-counter timestamps (`sample_index + preamble_offset_samples` / sample_rate_sps → 12MHz).
+- Server expects sync activity for peer formation; sending only `mlat` observations is insufficient. Ping is not required.
+- Partial `send()` truncates JSON lines and breaks parsing; use `send_all()` with EINTR/EAGAIN handling and reconnect on failure.
+- On `recv() == 0` treat peer closed as reconnect trigger.
+- ICAO cache must be evictable (oldest-last-seen) to accept new aircraft after 128 distinct ICAOs; stale parity is discarded rather than emitted as a valid sync pair.
+- Preserve caller `sample_rate_sps` (0 allowed) so fallback timestamp counter can actually increment when sample timing unknown.
+- Existing web UI/API contract tests do not cover MLAT/sync; build verification alone cannot prove peer formation.

@@ -9,10 +9,9 @@
  * - Separate FreeRTOS task, lock-free SPSC ring between decoder and network task
  * - Never blocks IQ/DSP; uses esp_timer monotonic time
  *
- * Timing: prefers sample-derived timestamp (rx_timestamp_sample_us/sample_index)
- * converted to 12MHz units. Falls back to decode-time only if unknown, but
- * logs/metrics flag invalid timing. True preamble-offset timing requires
- * decoder changes not present; this is a best-effort sample-aligned timestamp.
+ * Timing: uses sample_counter (sample_index + preamble_offset_samples) scaled
+ * from sample_rate_sps to 12MHz units. Falls back to decode-time (rx_timestamp_us*12)
+ * if sample rate unknown; invalid if no timing available.
  */
 
 #include "mlat_client.h"
@@ -21,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <stdarg.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -92,6 +92,34 @@ static mlat_client_config_t s_cfg = {
 static mlat_client_stats_t s_stats;
 static TaskHandle_t s_task = NULL;
 static volatile bool s_stop = false;
+
+typedef struct {
+    bool used;
+    uint32_t icao;
+    bool have_even;
+    bool have_odd;
+    uint64_t even_ts12;
+    uint64_t odd_ts12;
+    int64_t even_received_us;
+    int64_t odd_received_us;
+    int64_t last_seen_us;
+    uint8_t even_msg[14];
+    uint8_t odd_msg[14];
+} mlat_sync_entry_t;
+
+#define MLAT_SYNC_CACHE_SIZE 128
+#define MLAT_TRACK_JSON_MAX (MLAT_SYNC_CACHE_SIZE * 9 + 64)
+_Static_assert(MLAT_TRACK_JSON_MAX >= MLAT_SYNC_CACHE_SIZE * 9 + 11,
+               "tracking JSON buffer is too small");
+
+static mlat_sync_entry_t s_sync_cache[MLAT_SYNC_CACHE_SIZE];
+static uint32_t s_sync_sent_this_sec = 0;
+static int64_t s_sync_sec_start_us = 0;
+
+#define MLAT_TRACK_MAX 256
+static uint32_t s_track_last_reported[MLAT_TRACK_MAX];
+static int s_track_last_count = 0;
+static int64_t s_track_last_sent_us = 0;
 static volatile bool s_net_ready = false;
 
 static void ip_event_cb(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -241,7 +269,7 @@ void mlat_client_push_frame(const uint8_t *bytes, uint8_t bit_length,
         s_ring[head].rx_timestamp_us = rx_timestamp_us;
         s_ring[head].rx_timestamp_sample_us = rx_timestamp_sample_us;
         s_ring[head].sample_index = sample_index;
-        s_ring[head].sample_rate_sps = sample_rate_sps ? sample_rate_sps : 2400000;
+        s_ring[head].sample_rate_sps = sample_rate_sps;
         s_ring[head].preamble_offset_samples = preamble_offset_samples;
         s_ring[head].icao = icao;
         s_ring_head = next;
@@ -266,20 +294,19 @@ static bool ring_pop(ring_slot_t *out)
     return true;
 }
 
-/* Convert timestamp to 12MHz units for MLAT protocol */
-static uint64_t timestamp_to_12mhz(const ring_slot_t *s)
+/* Convert timestamp to 12MHz units */
+static uint64_t timestamp_to_12mhz_slot(const ring_slot_t *s)
 {
-    /* Prefer sample-derived/preamble-based timestamp if available */
-    if (s->rx_timestamp_sample_us > 0 && s->sample_rate_sps > 0) {
-        if (s->preamble_offset_samples > 0) {
-            s_stats.frames_ts_preamble++;
-        } else {
-            s_stats.frames_ts_preamble++;
-        }
-        return (uint64_t)s->rx_timestamp_sample_us * 12ULL;
+    if (s->sample_rate_sps > 0) {
+        uint64_t sample = s->sample_index + (uint64_t)s->preamble_offset_samples;
+        uint64_t rate = s->sample_rate_sps;
+        uint64_t sec = sample / rate;
+        uint64_t rem = sample % rate;
+        uint64_t ts12 = sec * 12000000ULL + (rem * 12000000ULL) / rate;
+        s_stats.frames_ts_preamble++;
+        return ts12;
     }
     if (s->rx_timestamp_us > 0) {
-        /* Fallback to decode time (less accurate for MLAT) */
         s_stats.frames_ts_fallback++;
         return (uint64_t)s->rx_timestamp_us * 12ULL;
     }
@@ -295,6 +322,45 @@ static void bytes_to_hex(const uint8_t *b, int n, char *out, int outlen)
         j += 2;
     }
     out[j] = '\0';
+}
+
+static bool send_all(int fd, const char *buf, size_t len)
+{
+    if (fd < 0 || !buf) return false;
+    if (len == 0) len = strlen(buf);
+    size_t sent = 0;
+    while (sent < len) {
+        int r = send(fd, buf + sent, len - sent, 0);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return false;
+            return false;
+        }
+        if (r == 0) return false;
+        sent += r;
+    }
+    return true;
+}
+
+static bool json_appendf(char *buf, size_t cap, size_t *used,
+                         const char *fmt, ...)
+{
+    if (!buf || !used || *used >= cap) {
+        return false;
+    }
+
+    va_list ap;
+    va_start(ap, fmt);
+    size_t avail = cap - *used;
+    int n = vsnprintf(buf + *used, avail, fmt, ap);
+    va_end(ap);
+
+    if (n < 0 || (size_t)n >= avail) {
+        return false;
+    }
+
+    *used += (size_t)n;
+    return true;
 }
 
 static void mlat_task(void *arg)
@@ -359,61 +425,332 @@ static void mlat_task(void *arg)
         snprintf(init, sizeof(init),
                  "{\"version\":3,\"user\":\"%s\",\"uuid\":\"%s\",\"client_version\":\"esp32p4-mlat/1.0\","
                  "\"lat\":%.6f,\"lon\":%.6f,\"alt\":%.1f,"
-                 "\"compress\":[\"none\"],\"clock_type\":\"radarcape_12mhz\"}\n",
+                 "\"compress\":[\"none\"],\"clock_type\":\"dump1090\"}\n",
                  user, user,
                  s_cfg.lat, s_cfg.lon, s_cfg.alt_m);
-        send(fd, init, strlen(init), 0);
+        if (!send_all(fd, init, strlen(init))) {
+            s_stats.connected = false;
+            close(fd);
+            s_stats.reconnects++;
+            vTaskDelay(pdMS_TO_TICKS(30000));
+            continue;
+        }
 
         /* Simple protocol loop: read responses, drain queue and send mlat messages */
         char rbuf[1024];
-        int64_t last_hb = esp_timer_get_time();
-        while (!s_stop && s_cfg.enabled) {
+        memset(s_sync_cache, 0, sizeof(s_sync_cache));
+        memset(s_track_last_reported, 0, sizeof(s_track_last_reported));
+        s_track_last_count = 0;
+        s_track_last_sent_us = esp_timer_get_time();
+        s_sync_sent_this_sec = 0;
+        s_sync_sec_start_us = esp_timer_get_time();
+        bool conn_bad = false;
+        while (!s_stop && s_cfg.enabled && !conn_bad) {
             /* Try to read server messages (non-blocking-ish via timeout) */
             int rr = recv(fd, rbuf, sizeof(rbuf)-1, MSG_DONTWAIT);
+            if (rr == 0) {
+                conn_bad = true;
+                break;
+            }
+            if (rr < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    /* no data */
+                } else {
+                    conn_bad = true;
+                    break;
+                }
+            }
             if (rr > 0) {
                 rbuf[rr] = '\0';
                 /* crude parse for results */
                 if (strstr(rbuf, "\"result\"")) s_stats.server_results++;
                 if (strstr(rbuf, "\"deny\"")) {
                     ESP_LOGW(TAG, "server denied connection: %s", rbuf);
+                    conn_bad = true;
                     break;
                 }
             }
 
             /* Drain up to N frames per iteration */
             int sent = 0;
-            while (sent < 20) {
+            while (sent < 30) {
                 ring_slot_t sl;
                 if (!ring_pop(&sl)) break;
-                uint64_t ts12 = timestamp_to_12mhz(&sl);
-                if (ts12 == 0) continue;
+                uint64_t ts12 = timestamp_to_12mhz_slot(&sl);
+                if (ts12 == 0) {
+                    continue;
+                }
+
+                /* Try to build sync pairs for DF17 airborne position */
+                if (sl.bit_length == 112) {
+                    uint8_t df = sl.bytes[0] >> 3;
+                    if (df == 17) {
+                        uint8_t tc = sl.bytes[4] >> 3;
+                        if ((tc >= 9 && tc <= 18) || (tc >= 20 && tc <= 22)) {
+                            bool odd = (sl.bytes[6] & 0x04) != 0;
+                            int64_t now_us = esp_timer_get_time();
+                            int idx = -1;
+                            for (int i = 0; i < MLAT_SYNC_CACHE_SIZE; i++) {
+                                if (s_sync_cache[i].used && s_sync_cache[i].icao == sl.icao) { idx = i; break; }
+                            }
+                            if (idx < 0) {
+                                /* find free */
+                                for (int i = 0; i < MLAT_SYNC_CACHE_SIZE; i++) {
+                                    if (!s_sync_cache[i].used) { idx = i; break; }
+                                }
+                                /* evict oldest */
+                                if (idx < 0) {
+                                    int best = 0;
+                                    int64_t best_age = s_sync_cache[0].last_seen_us;
+                                    for (int i = 1; i < MLAT_SYNC_CACHE_SIZE; i++) {
+                                        if (s_sync_cache[i].last_seen_us < best_age) {
+                                            best_age = s_sync_cache[i].last_seen_us;
+                                            best = i;
+                                        }
+                                    }
+                                    idx = best;
+                                    /* clear */
+                                    s_sync_cache[idx].used = true;
+                                    s_sync_cache[idx].icao = 0;
+                                    s_sync_cache[idx].have_even = false;
+                                    s_sync_cache[idx].have_odd = false;
+                                    s_sync_cache[idx].even_ts12 = 0;
+                                    s_sync_cache[idx].odd_ts12 = 0;
+                                    s_sync_cache[idx].even_received_us = 0;
+                                    s_sync_cache[idx].odd_received_us = 0;
+                                }
+                            }
+                            if (idx >= 0) {
+                                mlat_sync_entry_t *e = &s_sync_cache[idx];
+                                e->used = true;
+                                e->icao = sl.icao;
+                                e->last_seen_us = now_us;
+                                if (!odd) {
+                                    e->have_even = true;
+                                    e->even_ts12 = ts12;
+                                    e->even_received_us = now_us;
+                                    memcpy(e->even_msg, sl.bytes, 14);
+                                } else {
+                                    e->have_odd = true;
+                                    e->odd_ts12 = ts12;
+                                    e->odd_received_us = now_us;
+                                    memcpy(e->odd_msg, sl.bytes, 14);
+                                }
+                                /* expire old entries without pairs */
+                                for (int i = 0; i < MLAT_SYNC_CACHE_SIZE; i++) {
+                                    if (s_sync_cache[i].used && s_sync_cache[i].icao && !(s_sync_cache[i].have_even && s_sync_cache[i].have_odd)) {
+                                        if (now_us - s_sync_cache[i].last_seen_us > 5000000LL) {
+                                            if (s_sync_cache[i].have_even && (now_us - s_sync_cache[i].even_received_us > 5000000LL)) s_sync_cache[i].have_even = false;
+                                            if (s_sync_cache[i].have_odd && (now_us - s_sync_cache[i].odd_received_us > 5000000LL)) s_sync_cache[i].have_odd = false;
+                                        }
+                                    }
+                                }
+                                if (e->have_even && e->have_odd) {
+                                    if (llabs(e->even_received_us - e->odd_received_us) <= 5000000LL) {
+                                        bool ordered = (e->even_ts12 < e->odd_ts12) && (e->even_received_us < e->odd_received_us);
+                                        if (!ordered) {
+                                            e->have_even = false;
+                                            e->have_odd = false;
+                                        } else {
+                                            s_stats.sync_pairs_seen++;
+                                            int64_t secnow = now_us / 1000000LL;
+                                            int64_t secstart = s_sync_sec_start_us / 1000000LL;
+                                            if (secstart != secnow) {
+                                                s_sync_sec_start_us = now_us;
+                                                s_sync_sent_this_sec = 0;
+                                            }
+                                            if (s_sync_sent_this_sec < 40) {
+                                                char em[32], om[32];
+                                                bytes_to_hex(e->even_msg, 14, em, sizeof(em));
+                                                bytes_to_hex(e->odd_msg, 14, om, sizeof(om));
+                                                char smsg[220];
+                                                snprintf(smsg, sizeof(smsg), "{\"sync\":{\"et\":%llu,\"ot\":%llu,\"em\":\"%s\",\"om\":\"%s\"}}\n",
+                                                         (unsigned long long)e->even_ts12, (unsigned long long)e->odd_ts12, em, om);
+                                                if (!send_all(fd, smsg, strlen(smsg))) {
+                                                    conn_bad = true;
+                                                    break;
+                                                }
+                                                s_stats.sync_sent++;
+                                                s_sync_sent_this_sec++;
+                                            }
+                                            e->have_even = false;
+                                            e->have_odd = false;
+                                        }
+                                    } else {
+                                        if (e->even_received_us < e->odd_received_us - 5000000LL) e->have_even = false;
+                                        else e->have_odd = false;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 uint8_t mlen = sl.bit_length / 8;
                 char mhex[64];
                 bytes_to_hex(sl.bytes, mlen, mhex, sizeof(mhex));
                 char msg[256];
                 snprintf(msg, sizeof(msg), "{\"mlat\":{\"t\":%llu,\"m\":\"%s\"}}\n",
                          (unsigned long long)ts12, mhex);
-                int wr = send(fd, msg, strlen(msg), 0);
-                if (wr < 0) break;
+                if (!send_all(fd, msg, strlen(msg))) {
+                    conn_bad = true;
+                    break;
+                }
                 s_stats.frames_submitted++;
                 s_stats.tcp_sent++;
                 sent++;
             }
 
-            /* Keepalive */
-            int64_t now = esp_timer_get_time();
-            if (now - last_hb > 120000000LL) {
-                const char *hb = "{\"ping\":1}\n";
-                send(fd, hb, strlen(hb), 0);
-                last_hb = now;
+            /* Track seen/lost once per second */
+            {
+                int64_t now_us = esp_timer_get_time();
+                if (now_us - s_track_last_sent_us >= 1000000LL) {
+                    uint32_t active[MLAT_TRACK_MAX];
+                    int active_cnt = 0;
+
+                    for (int i = 0;
+                         i < MLAT_SYNC_CACHE_SIZE && active_cnt < MLAT_TRACK_MAX;
+                         i++) {
+                        if (s_sync_cache[i].used &&
+                            s_sync_cache[i].icao != 0 &&
+                            s_sync_cache[i].last_seen_us > 0 &&
+                            now_us - s_sync_cache[i].last_seen_us <= 10000000LL) {
+                            active[active_cnt++] = s_sync_cache[i].icao;
+                        }
+                    }
+
+                    bool tracking_ok = true;
+
+                    {
+                        char buf[MLAT_TRACK_JSON_MAX];
+                        size_t used = 0;
+                        bool ok = json_appendf(buf, sizeof(buf), &used, "{\"seen\":[");
+                        bool first = true;
+
+                        if (ok) {
+                            for (int a = 0; a < active_cnt; a++) {
+                                bool seen_before = false;
+                                for (int l = 0; l < s_track_last_count; l++) {
+                                    if (s_track_last_reported[l] == active[a]) {
+                                        seen_before = true;
+                                        break;
+                                    }
+                                }
+                                if (seen_before) {
+                                    continue;
+                                }
+                                if (!first &&
+                                    !json_appendf(buf, sizeof(buf), &used, ",")) {
+                                    ok = false;
+                                    break;
+                                }
+                                if (!json_appendf(buf, sizeof(buf), &used,
+                                                  "\"%06x\"",
+                                                  (unsigned int)active[a])) {
+                                    ok = false;
+                                    break;
+                                }
+                                first = false;
+                            }
+                        }
+
+                        if (ok &&
+                            !json_appendf(buf, sizeof(buf), &used, "]}\n")) {
+                            ok = false;
+                        }
+
+                        if (!ok) {
+                            tracking_ok = false;
+                            ESP_LOGE(TAG, "seen JSON build failed (%d active)", active_cnt);
+                        } else if (!first) {
+                            if (!send_all(fd, buf, used)) {
+                                conn_bad = true;
+                                tracking_ok = false;
+                            } else {
+                                s_stats.tracking_seen_sent++;
+                            }
+                        }
+                    }
+
+                    if (!conn_bad && tracking_ok) {
+                        char buf[MLAT_TRACK_JSON_MAX];
+                        size_t used = 0;
+                        bool ok = json_appendf(buf, sizeof(buf), &used, "{\"lost\":[");
+                        bool first = true;
+
+                        if (ok) {
+                            for (int l = 0; l < s_track_last_count; l++) {
+                                bool still = false;
+                                for (int a = 0; a < active_cnt; a++) {
+                                    if (active[a] == s_track_last_reported[l]) {
+                                        still = true;
+                                        break;
+                                    }
+                                }
+                                if (still) {
+                                    continue;
+                                }
+                                if (!first &&
+                                    !json_appendf(buf, sizeof(buf), &used, ",")) {
+                                    ok = false;
+                                    break;
+                                }
+                                if (!json_appendf(buf, sizeof(buf), &used,
+                                                  "\"%06x\"",
+                                                  (unsigned int)s_track_last_reported[l])) {
+                                    ok = false;
+                                    break;
+                                }
+                                first = false;
+                            }
+                        }
+
+                        if (ok &&
+                            !json_appendf(buf, sizeof(buf), &used, "]}\n")) {
+                            ok = false;
+                        }
+
+                        if (!ok) {
+                            tracking_ok = false;
+                            ESP_LOGE(TAG, "lost JSON build failed (%d tracked)", s_track_last_count);
+                        } else if (!first) {
+                            if (!send_all(fd, buf, used)) {
+                                conn_bad = true;
+                                tracking_ok = false;
+                            } else {
+                                s_stats.tracking_lost_sent++;
+                            }
+                        }
+                    }
+
+                    if (!conn_bad) {
+                        if (tracking_ok) {
+                            for (int a = 0;
+                                 a < active_cnt && a < MLAT_TRACK_MAX;
+                                 a++) {
+                                s_track_last_reported[a] = active[a];
+                            }
+                            s_track_last_count = active_cnt;
+                        }
+                        s_track_last_sent_us = now_us;
+                    }
+                }
             }
+
+            if (conn_bad) break;
+
+            /* No ping */
 
             if (sent == 0) vTaskDelay(pdMS_TO_TICKS(10));
         }
 
         s_stats.connected = false;
         close(fd);
-        s_stats.reconnects++;
+        if (conn_bad) {
+            s_stats.reconnects++;
+        } else {
+            s_stats.reconnects++;
+        }
         vTaskDelay(pdMS_TO_TICKS(30000));
     }
 
